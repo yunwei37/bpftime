@@ -16,6 +16,9 @@
 #include "spdlog/spdlog.h"
 
 #include <array>
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
 #include <memory>
@@ -61,6 +64,15 @@ struct omni_pt_regs {
 using namespace bpftime;
 using namespace bpftime::attach;
 
+// Lightweight stderr-only diagnostics. No file I/O: writing a FUSE mount from a
+// forked Ray worker is unsafe, so diagnostics never touch the filesystem.
+static void omni_dbg(const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	vfprintf(stderr, fmt, ap);
+	va_end(ap);
+}
 namespace
 {
 struct omni_private_data : attach_private_data {
@@ -85,7 +97,10 @@ struct omni_private_data : attach_private_data {
 				offset = std::stoull(raw.substr(pos + 1));
 			}
 		} catch (...) {
-			return -EINVAL;
+			// Non-address specs (e.g. kprobe func names like
+			// __x64_sys_mmap) carry no module:offset. Keep the raw text and
+			// succeed: kernel-only attaches no-op in create_attach, so a
+			// parse miss here must not abort context initialization.
 		}
 		return 0;
 	}
@@ -105,6 +120,8 @@ class omni_attach_impl final : public base_attach_impl
 	std::array<slot, OMNI_MAX_TRAMPOLINES> slots;
 	std::array<std::pair<std::string, uintptr_t>, OMNI_MAX_TRAMPOLINES>
 		symbols{};
+	std::array<uintptr_t, OMNI_MAX_TRAMPOLINES> symbol_addrs{};
+	std::array<uintptr_t, OMNI_MAX_TRAMPOLINES> module_bases{};
 
 	int create_attach_with_ebpf_callback(
 		ebpf_run_callback &&cb, const attach_private_data &pd,
@@ -118,24 +135,31 @@ class omni_attach_impl final : public base_attach_impl
 			(void)pd;
 			return id;
 		}
-		const auto &d = dynamic_cast<const omni_private_data &>(pd);
-		int idx = resolve_slot(d);
-		if (idx < 0) {
-			SPDLOG_DEBUG(
-				"omni embed: unattached external uprobe `{}` ignored",
-				d.raw);
-			return id; // do not fail init for unrelated uprobes
-		}
-		slots[idx].used = true;
-		slots[idx].cb = std::move(cb);
-		SPDLOG_INFO("omni embed: bound trampoline {} to `{}`", idx + 1,
-			    d.raw);
-		return id;
+	const auto &d = dynamic_cast<const omni_private_data &>(pd);
+	omni_dbg(
+		     "OMNI_EMBED_DBG create type=%d raw=%s colon=%d mod=%s off=%p addr=%p\n",
+		     attach_type, d.raw.c_str(), d.has_colon ? 1 : 0,
+		     d.module.c_str(), reinterpret_cast<void *>(d.offset),
+		     reinterpret_cast<void *>(d.address));
+	int idx = resolve_slot(d);
+	if (idx < 0) {
+		omni_dbg(
+			     "OMNI_EMBED_DBG unresolved uprobe raw=%s -> ignored\n",
+			     d.raw.c_str());
+		return id; // do not fail init for unrelated uprobes
+	}
+	slots[idx].used = true;
+	slots[idx].cb = std::move(cb);
+	omni_dbg( "OMNI_EMBED_DBG bound trampoline=%d raw=%s\n",
+		     idx + 1, d.raw.c_str());
+	return id;
 	}
 	int detach_by_id(int id) override { return id >= 0 ? 0 : -EINVAL; }
 
 	int run(int trampoline, const omni_embed_ctx &e)
 	{
+		static thread_local int dbg_n = 0;
+		bool dbg = dbg_n++ < 6;
 		if (trampoline < 1 || trampoline > OMNI_MAX_TRAMPOLINES)
 			return -EINVAL;
 		auto &s = slots[trampoline - 1];
@@ -161,23 +185,70 @@ class omni_attach_impl final : public base_attach_impl
 		regs.pc = e.probe_ip;
 		regs.sp = e.frame_bp;
 #endif
-		uint64_t ret = 0;
-		return s.cb(&regs, sizeof(regs), &ret);
+	uint64_t ret = 0;
+	int rc = s.cb(&regs, sizeof(regs), &ret);
+	if (dbg)
+		omni_dbg(
+			     "OMNI_EMBED_DBG trigger tramp=%d arg1=%p arg2=%p rc=%d ret=%llu\n",
+			     trampoline, reinterpret_cast<void *>(e.arg1),
+			     reinterpret_cast<void *>(e.arg2), rc,
+			     (unsigned long long)ret);
+	return rc;
 	}
 
       private:
 	int resolve_slot(const omni_private_data &d)
 	{
-		for (int i = 0; i < OMNI_MAX_TRAMPOLINES; ++i) {
-			const auto &[mod, off] = symbols[i];
-			if (mod.empty())
+		auto base_of = [](const std::string &p) -> std::string {
+			auto slash = p.find_last_of('/');
+			return slash == std::string::npos ? p :
+							     p.substr(slash + 1);
+		};
+		std::string target_base = base_of(d.module);
+		for (int i = 0; i < 3; ++i) {
+			if (!symbol_addrs[i])
 				continue;
-			if (d.has_colon) {
-				if (d.module == mod && d.offset == off)
-					return i;
-			} else if (d.address && d.address == symbols_addr(i)) {
+			// Path A: handler gave a bare absolute address.
+			if (!d.has_colon && d.address &&
+			    d.address == symbol_addrs[i])
 				return i;
+			if (d.has_colon) {
+				bool same_module =
+					!target_base.empty() &&
+					target_base == symbols[i].first;
+				// Relative offset is position-independent and
+				// survives PIE/ASLR base differences; accept a
+				// match on offset alone within the same basename,
+				// or when only one shim module is present.
+				bool same_offset = d.offset == symbols[i].second;
+				bool same_abs =
+					module_bases[i] + d.offset ==
+					symbol_addrs[i];
+				if (same_abs || (same_module && same_offset))
+					return i;
 			}
+		}
+		// Last resort: a single embedded shim means every module:offset
+		// uprobe targets one of our three trampolines; match by relative
+		// offset regardless of how the module path was spelled.
+		if (d.has_colon && d.offset) {
+			for (int i = 0; i < 3; ++i)
+				if (symbol_addrs[i] &&
+				    d.offset == symbols[i].second)
+					return i;
+		}
+		// Diagnose the mismatch against every known symbol.
+		for (int i = 0; i < 3; ++i) {
+			if (!symbol_addrs[i])
+				continue;
+			omni_dbg(
+				     "OMNI_EMBED_DBG   cmp i=%d mod=%s off=%p abs=%p | target mod=%s off=%p addr=%p\n",
+				     i, symbols[i].first.c_str(),
+				     reinterpret_cast<void *>(symbols[i].second),
+				     reinterpret_cast<void *>(symbol_addrs[i]),
+				     d.module.c_str(),
+				     reinterpret_cast<void *>(d.offset),
+				     reinterpret_cast<void *>(d.address));
 		}
 		return -1;
 	}
@@ -267,21 +338,26 @@ extern "C" int omni_embed_open(const char * /*shm_name*/,
 						       std::move(pd)) :
 						       nullptr;
 			});
-		g_open_error = g_ctx->init_attach_ctx_from_handlers(
+		int rc = g_ctx->init_attach_ctx_from_handlers(
 			bpftime_get_runtime_config());
-	} catch (const std::exception &ex) {
-		SPDLOG_ERROR("omni embed init failed: {}", ex.what());
-		g_open_error = -1;
-	}
-	// On failure (handlers not published by the collector yet at shim
-	// constructor time) keep g_initialized false so the next trigger retries.
-	if (g_open_error == 0)
+		// Kernel-only probes are expected to be skipped in rootless; their
+		// per-handler rc must not block the uprobe path. Once the context is
+		// constructed and the impl is registered, we are ready to trigger.
+		if (rc != 0)
+			SPDLOG_WARN(
+				"omni embed: init rc={} (kernel-only probes ignored)",
+				rc);
+		g_open_error = 0;
 		g_initialized = true;
-	else {
+	} catch (const std::exception &ex) {
+		// Likely shared memory/handlers not ready yet at shim constructor
+		// time; leave g_initialized false so the next trigger retries.
+		SPDLOG_WARN("omni embed init deferred: {}", ex.what());
+		g_open_error = -1;
 		g_ctx.reset();
 		g_impl = nullptr;
 	}
-	return g_open_error;
+	return g_initialized ? 0 : g_open_error;
 }
 
 extern "C" int omni_embed_trigger(const omni_embed_ctx *ctx)
