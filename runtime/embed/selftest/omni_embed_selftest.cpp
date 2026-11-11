@@ -38,6 +38,11 @@ omni_profiler_sample_alloc(void *ptr, size_t size, uint32_t kind,
 		      : "memory");
 }
 extern "C" __attribute__((noinline, visibility("default"))) void
+omni_profiler_sample_free(void *ptr)
+{
+	asm volatile("" ::"r"(ptr) : "memory");
+}
+extern "C" __attribute__((noinline, visibility("default"))) void
 omni_profiler_pid_sync(uint32_t reason)
 {
 	asm volatile("" ::"r"(reason) : "memory");
@@ -75,7 +80,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	// Program handler at slot 0.
+	// Program handler at slot 0; one uprobe perf event + link per trampoline.
 	manager->set_handler(
 		0,
 		bpf_prog_handler(segment, prog->get_insns().data(),
@@ -83,25 +88,41 @@ int main(int argc, char **argv)
 				 (int)bpf_prog_type::BPF_PROG_TYPE_KPROBE),
 		segment);
 
-	// Uprobe perf event on the alloc trampoline at slot 4.
+	struct anchor {
+		const char *name;
+		void *addr;
+	};
+	const anchor anchors[3] = {
+		{ "omni_profiler_sample_alloc",
+		  reinterpret_cast<void *>(&omni_profiler_sample_alloc) },
+		{ "omni_profiler_sample_free",
+		  reinterpret_cast<void *>(&omni_profiler_sample_free) },
+		{ "omni_profiler_pid_sync",
+		  reinterpret_cast<void *>(&omni_profiler_pid_sync) },
+	};
 	Dl_info info;
-	dladdr(reinterpret_cast<void *>(&omni_profiler_sample_alloc), &info);
+	dladdr(anchors[0].addr, &info);
 	std::string mod = info.dli_fname ? info.dli_fname : "";
 	auto slash = mod.find_last_of('/');
 	if (slash != std::string::npos)
 		mod = mod.substr(slash + 1);
 	uintptr_t base = reinterpret_cast<uintptr_t>(info.dli_fbase);
-	uint64_t off =
-		reinterpret_cast<uintptr_t>(&omni_profiler_sample_alloc) - base;
-	fprintf(stderr, "selftest: module=%s off=%#lx\n", mod.c_str(),
-		(unsigned long)off);
-	manager->set_handler(
-		4,
-		bpf_perf_event_handler(bpf_event_type::BPF_TYPE_UPROBE, off,
-				       -1, mod.c_str(), segment),
-		segment);
-	// Link program 0 -> perf event 4.
-	manager->set_handler_at_empty_slot(bpf_link_handler(0, 4), segment);
+	// Perf events at slots 4..6, each linked to program 0.
+	for (int i = 0; i < 3; ++i) {
+		uint64_t off =
+			reinterpret_cast<uintptr_t>(anchors[i].addr) - base;
+		int perf_fd = 4 + i;
+		manager->set_handler(
+			perf_fd,
+			bpf_perf_event_handler(bpf_event_type::BPF_TYPE_UPROBE,
+					       off, -1, mod.c_str(),
+					       segment),
+			segment);
+		manager->set_handler_at_empty_slot(
+			bpf_link_handler(0, perf_fd), segment);
+		fprintf(stderr, "selftest: handler[%d] %s off=%#lx\n", i,
+			anchors[i].name, (unsigned long)off);
+	}
 
 	// 2. dlopen and initialize the embed library against the same shm.
 	void *h = dlopen(embed_so, RTLD_NOW | RTLD_LOCAL);
@@ -125,17 +146,26 @@ int main(int argc, char **argv)
 	int rc = p_open(SHM, nullptr);
 	fprintf(stderr, "selftest: omni_embed_open rc=%d\n", rc);
 
-	// 3. Trigger with a recognizable argument and verify the BPF R0 echo.
-	constexpr uint64_t MAGIC = 0x1234;
-	omni_embed_ctx ctx{};
-	ctx.trampoline = OMNI_EMBED_TRAMP_ALLOC;
-	ctx.arg1 = MAGIC;
-	int trc = p_trig(&ctx);
-	fprintf(stderr,
-		"selftest: trigger rc=%d result_out=%#llx (expect %#llx)\n", trc,
-		(unsigned long long)ctx.result_out,
-		(unsigned long long)(MAGIC & 0xffff));
-	bool ok = (trc == 0) && (ctx.result_out == (MAGIC & 0xffff));
+	// 3. Trigger every trampoline with a distinct arg and verify BPF R0 echo.
+	bool ok = (rc == 0);
+	const int tramp[3] = { OMNI_EMBED_TRAMP_ALLOC, OMNI_EMBED_TRAMP_FREE,
+			      OMNI_EMBED_TRAMP_PID_SYNC };
+	for (int i = 0; i < 3; ++i) {
+		uint64_t magic = 0x1000 + i;
+		omni_embed_ctx ctx{};
+		ctx.trampoline = tramp[i];
+		ctx.arg1 = magic;
+		int trc = p_trig(&ctx);
+		uint64_t expect = magic & 0xffff;
+		bool good = (trc == 0) && (ctx.result_out == expect);
+		fprintf(stderr,
+			"selftest: tramp=%d rc=%d result=%#llx expect=%#llx %s\n",
+			tramp[i], trc,
+			(unsigned long long)ctx.result_out,
+			(unsigned long long)expect,
+			good ? "ok" : "BAD");
+		ok = ok && good;
+	}
 
 	manager->clear_all(segment);
 	segment.destroy_ptr(manager);
