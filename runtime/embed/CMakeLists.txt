@@ -31,3 +31,5 @@ if(BPFTIME_ENABLE_OMNI_EMBED)
     LIBRARY DESTINATION lib
   )
 endif()
+
+add_subdirectory(selftest)

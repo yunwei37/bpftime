@@ -193,6 +193,7 @@ class omni_attach_impl final : public base_attach_impl
 			     trampoline, reinterpret_cast<void *>(e.arg1),
 			     reinterpret_cast<void *>(e.arg2), rc,
 			     (unsigned long long)ret);
+	const_cast<omni_embed_ctx &>(e).result_out = ret;
 	return rc;
 	}
 
@@ -285,6 +286,8 @@ void build_symbols(omni_attach_impl &impl)
 	for (int i = 0; i < 3; ++i) {
 		void *p = dlsym(RTLD_DEFAULT, names[i]);
 		Dl_info info;
+		omni_dbg("OMNI_EMBED_DBG build[%d] name=%s dlsym=%p\n", i,
+			 names[i], p);
 		if (p && dladdr(p, &info) && info.dli_fbase) {
 			auto base = reinterpret_cast<uintptr_t>(info.dli_fbase);
 			auto addr = reinterpret_cast<uintptr_t>(p);
@@ -295,6 +298,13 @@ void build_symbols(omni_attach_impl &impl)
 							     std::string(fn)
 								     .substr(slash + 1);
 			impl.symbols[i] = { base_name, addr - base };
+			impl.symbol_addrs[i] = addr;
+			impl.module_bases[i] = base;
+			omni_dbg(
+				"OMNI_EMBED_DBG build[%d] mod=%s base=%p off=%p\n",
+				i, base_name.c_str(),
+				reinterpret_cast<void *>(base),
+				reinterpret_cast<void *>(addr - base));
 		}
 	}
 }
