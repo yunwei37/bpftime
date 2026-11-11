@@ -28,10 +28,20 @@
 // locally so this target does not depend on the frida attach headers.
 #define OMNI_ATTACH_UPROBE 6
 #define OMNI_ATTACH_URETPROBE 7
+#define OMNI_ATTACH_KPROBE 8
+#define OMNI_ATTACH_KRETPROBE 9
+#define OMNI_ATTACH_TRACEPOINT 2
 #define OMNI_ATTACH_UPROBE_OVERRIDE 1008
 #define OMNI_ATTACH_UREPLACE 1009
 #define OMNI_MAX_TRAMPOLINES 8
 
+// Kernel-only perf sources cannot be attached in rootless userspace. They are
+// accepted as no-ops so handler instantiation does not abort the whole context.
+static bool omni_is_kernel_only_type(int t)
+{
+	return t == OMNI_ATTACH_TRACEPOINT || t == OMNI_ATTACH_KPROBE ||
+	       t == OMNI_ATTACH_KRETPROBE;
+}
 #if defined(__x86_64__) || defined(_M_X64)
 struct omni_pt_regs {
 	uint64_t r15, r14, r13, r12, bp, bx, r11, r10, r9, r8, ax, cx, dx, si,
@@ -98,11 +108,18 @@ class omni_attach_impl final : public base_attach_impl
 
 	int create_attach_with_ebpf_callback(
 		ebpf_run_callback &&cb, const attach_private_data &pd,
-		int /*attach_type*/) override
+		int attach_type) override
 	{
+		int id = allocate_id();
+		// Rootless cannot service kernel probes/tracepoints: accept the
+		// attach as a no-op so context init proceeds.
+		if (omni_is_kernel_only_type(attach_type)) {
+			(void)cb;
+			(void)pd;
+			return id;
+		}
 		const auto &d = dynamic_cast<const omni_private_data &>(pd);
 		int idx = resolve_slot(d);
-		int id = allocate_id();
 		if (idx < 0) {
 			SPDLOG_DEBUG(
 				"omni embed: unattached external uprobe `{}` ignored",
@@ -183,9 +200,10 @@ class omni_attach_impl final : public base_attach_impl
 	}
 };
 
-std::once_flag g_once;
+std::mutex g_init_mutex;
 std::optional<bpf_attach_ctx> g_ctx;
 omni_attach_impl *g_impl = nullptr;
+bool g_initialized = false;
 int g_open_error = 0;
 
 void build_symbols(omni_attach_impl &impl)
@@ -219,45 +237,64 @@ extern "C" int omni_embed_abi_version(void)
 extern "C" int omni_embed_open(const char * /*shm_name*/,
 			       const char * /*config_path*/)
 {
-	std::call_once(g_once, [] {
-		try {
-			spdlog::cfg::load_env_levels();
-			bpftime_initialize_global_shm(
-				shm_open_type::SHM_CREATE_OR_OPEN);
-			g_ctx.emplace();
-			auto impl = std::make_unique<omni_attach_impl>();
-			g_impl = impl.get();
-			build_symbols(*g_impl);
-			g_ctx->register_attach_impl(
-				{ OMNI_ATTACH_UPROBE, OMNI_ATTACH_URETPROBE,
-				  OMNI_ATTACH_UPROBE_OVERRIDE,
-				  OMNI_ATTACH_UREPLACE },
-				std::move(impl),
-				[](const std::string_view sv, int &err)
-					-> std::unique_ptr<attach_private_data> {
-					auto pd =
-						std::make_unique<omni_private_data>();
-					err = pd->initialize_from_string(sv);
-					return err == 0 ?
-						       std::unique_ptr<
-							       attach_private_data>(
-							       std::move(pd)) :
+	std::lock_guard<std::mutex> guard(g_init_mutex);
+	if (g_initialized)
+		return g_open_error;
+	try {
+		spdlog::cfg::load_env_levels();
+		bpftime_initialize_global_shm(
+			shm_open_type::SHM_CREATE_OR_OPEN);
+		g_ctx.emplace();
+		auto impl = std::make_unique<omni_attach_impl>();
+		g_impl = impl.get();
+		build_symbols(*g_impl);
+		// Uprobe types bind real callbacks; kernel-only types are
+		// registered so they no-op instead of aborting context init.
+		g_ctx->register_attach_impl(
+			{ OMNI_ATTACH_TRACEPOINT, OMNI_ATTACH_KPROBE,
+			  OMNI_ATTACH_KRETPROBE, OMNI_ATTACH_UPROBE,
+			  OMNI_ATTACH_URETPROBE, OMNI_ATTACH_UPROBE_OVERRIDE,
+			  OMNI_ATTACH_UREPLACE },
+			std::move(impl),
+			[](const std::string_view sv, int &err)
+				-> std::unique_ptr<attach_private_data> {
+				auto pd =
+					std::make_unique<omni_private_data>();
+				err = pd->initialize_from_string(sv);
+				return err == 0 ?
+					       std::unique_ptr<
+						       attach_private_data>(
+						       std::move(pd)) :
 						       nullptr;
-				});
-			g_open_error = g_ctx->init_attach_ctx_from_handlers(
-				bpftime_get_runtime_config());
-		} catch (const std::exception &ex) {
-			SPDLOG_ERROR("omni embed init failed: {}", ex.what());
-			g_open_error = -1;
-		}
-	});
+			});
+		g_open_error = g_ctx->init_attach_ctx_from_handlers(
+			bpftime_get_runtime_config());
+	} catch (const std::exception &ex) {
+		SPDLOG_ERROR("omni embed init failed: {}", ex.what());
+		g_open_error = -1;
+	}
+	// On failure (handlers not published by the collector yet at shim
+	// constructor time) keep g_initialized false so the next trigger retries.
+	if (g_open_error == 0)
+		g_initialized = true;
+	else {
+		g_ctx.reset();
+		g_impl = nullptr;
+	}
 	return g_open_error;
 }
 
 extern "C" int omni_embed_trigger(const omni_embed_ctx *ctx)
 {
-	if (!ctx || !g_impl)
-		return -ENXIO;
+	if (!ctx)
+		return -EINVAL;
+	// Lazy (re)initialization: at shim constructor time the collector may not
+	// have published handlers yet, so retry on every trigger until ready.
+	if (!g_initialized) {
+		int rc = omni_embed_open(nullptr, nullptr);
+		if (rc != 0 || !g_impl)
+			return -ENXIO;
+	}
 	try {
 		return g_impl->run(ctx->trampoline, *ctx);
 	} catch (const std::exception &ex) {
