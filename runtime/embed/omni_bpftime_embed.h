@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define OMNI_EMBED_ABI_VERSION 1
+#define OMNI_EMBED_ABI_VERSION 2
 
 /* Stable identifiers for the three shim trampolines. Values are part of the
  * ABI and must not be renumbered. */
@@ -39,6 +39,7 @@ struct omni_embed_ctx {
   uintptr_t frame_bp; /* frame pointer at the trampoline, for stack unwind */
   uintptr_t probe_ip; /* address of the trampoline symbol */
   uintptr_t caller_ip; /* return address into the shim caller chain */
+  uint64_t result_out; /* out: eBPF program R0 after the trigger runs */
 };
 
 /* Returns the ABI version implemented by the loaded embed library. The shim
