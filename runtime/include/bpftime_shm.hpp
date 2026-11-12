@@ -23,6 +23,7 @@ struct ebpf_inst;
 
 namespace bpftime
 {
+inline constexpr int thread_cpu_clock_attach_type = 10020;
 
 struct bpf_map_attr {
 	int type = 0;
@@ -429,6 +430,8 @@ int bpftime_add_ureplace_or_override(int fd, int pid, const char *name,
 int bpftime_get_current_thread_cookie(uint64_t *out);
 
 int bpftime_add_custom_perf_event(int type, const char *attach_argument);
+bool bpftime_thread_cpu_clock_enabled(int fd);
+bool bpftime_is_thread_cpu_clock(int fd);
 #ifdef BPFTIME_ENABLE_CUDA_ATTACH
 int bpftime_poll_gpu_ringbuf_map(int mapfd, void *ctx,
 				 void (*)(const void *, uint64_t, void *));

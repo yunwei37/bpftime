@@ -687,6 +687,24 @@ extern "C" uint64_t map_val(uint64_t map_ptr)
 	return (uint64_t)handler.map_lookup_elem(key.data());
 }
 
+bool bpftime_thread_cpu_clock_enabled(int fd)
+{
+	if (!bpftime_is_thread_cpu_clock(fd))
+		return false;
+	auto &shm = shm_holder.global_shared_memory;
+	const auto &handler = std::get<bpf_perf_event_handler>(shm.get_handler(fd));
+	return handler.is_enabled();
+}
+
+bool bpftime_is_thread_cpu_clock(int fd)
+{
+	auto &shm = shm_holder.global_shared_memory;
+	if (!shm.is_perf_fd(fd))
+		return false;
+	const auto &handler = std::get<bpf_perf_event_handler>(shm.get_handler(fd));
+	return handler.type == bpftime::thread_cpu_clock_attach_type;
+}
+
 int bpftime_add_custom_perf_event(int type, const char *attach_argument)
 {
 	return shm_holder.global_shared_memory.add_custom_perf_event(

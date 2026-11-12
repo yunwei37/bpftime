@@ -1215,6 +1215,19 @@ int syscall_context::handle_perfevent(perf_event_attr *attr, pid_t pid, int cpu,
 		SPDLOG_DEBUG("Created tracepoint perf event with fd {}", fd);
 		return fd;
 	} else if ((int)attr->type == (int)bpf_event_type::PERF_TYPE_SOFTWARE) {
+#if defined(__linux__) && defined(__x86_64__)
+		if (!run_with_kernel && attr->config == PERF_COUNT_SW_CPU_CLOCK &&
+		    attr->freq && attr->sample_freq && pid == -1 && cpu >= 0 &&
+		    group_fd == -1 && getenv("BPFTIME_EXPERIMENT_THREAD_CPU_CLOCK")) {
+			if (attr->sample_freq > 1000) {
+				errno = EINVAL;
+				return -1;
+			}
+			const auto argument = fmt_lib::format("{}:{}", 1000000000ULL / attr->sample_freq, cpu);
+			return bpftime_add_custom_perf_event(thread_cpu_clock_attach_type,
+							     argument.c_str());
+		}
+#endif
 		SPDLOG_DEBUG("Detected software perf event creation");
 		int reserved_fd = orig_syscall_fn(
 			__NR_eventfd2, 0, EFD_CLOEXEC | EFD_NONBLOCK);
@@ -1379,7 +1392,7 @@ int syscall_context::handle_ioctl(int fd, unsigned long req, unsigned long data)
 			"Failed to call mocked ioctl PERF_EVENT_IOC_SET_BPF: {}",
 			res);
 	} else if (req == PERF_EVENT_IOC_ID &&
-		   bpftime_is_software_perf_event(fd)) {
+		   (bpftime_is_software_perf_event(fd) || bpftime_is_thread_cpu_clock(fd))) {
 		if (data == 0) {
 			errno = EFAULT;
 			return -1;

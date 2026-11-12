@@ -147,11 +147,13 @@ int64_t syscall_trace_attach_impl::dispatch_syscall(int64_t sys_nr,
 	// Keep the std::function target within its small-object buffer. A syscall
 	// can be issued while libc holds its malloc lock, so allocating here would
 	// recursively enter malloc and deadlock the target process.
+#ifndef BPFTIME_ROOTLESS_MEMORY_OBSERVE_ONLY
 	struct override_state {
 		bool is_overrided = false;
 		uint64_t user_ret = 0;
 		uint64_t user_ret_ctx = 0;
 	} override_state;
+#endif
 	auto run_callback = [](syscall_trace_attach_entry *prog,
 			       const auto &ctx) noexcept {
 		try {
@@ -267,6 +269,7 @@ int64_t syscall_trace_attach_impl::dispatch_syscall(int64_t sys_nr,
 	};
 
 	if (run_enter) {
+#ifndef BPFTIME_ROOTLESS_MEMORY_OBSERVE_ONLY
 		curr_thread_override_return_callback =
 			override_return_set_callback([state = &override_state](
 						     uint64_t ctx, uint64_t v) {
@@ -274,12 +277,15 @@ int64_t syscall_trace_attach_impl::dispatch_syscall(int64_t sys_nr,
 				state->user_ret = v;
 				state->user_ret_ctx = ctx;
 			});
+#endif
 		run_enter_callbacks(sys_enter_callbacks[sys_nr]);
 		run_enter_callbacks(global_enter_callbacks);
+#ifndef BPFTIME_ROOTLESS_MEMORY_OBSERVE_ONLY
 		curr_thread_override_return_callback.reset();
 		if (override_state.is_overrided) {
 			return override_state.user_ret;
 		}
+#endif
 	}
 	SPDLOG_DEBUG("executing original syscall");
 	int64_t ret = orig_syscall(sys_nr, arg1, arg2, arg3, arg4, arg5, arg6,
@@ -293,6 +299,7 @@ int64_t syscall_trace_attach_impl::dispatch_syscall(int64_t sys_nr,
 		run_process_fork_callbacks(parent_pid, static_cast<int>(ret));
 	}
 	if (run_exit) {
+#ifndef BPFTIME_ROOTLESS_MEMORY_OBSERVE_ONLY
 		curr_thread_override_return_callback =
 			override_return_set_callback([state = &override_state](
 						     uint64_t ctx, uint64_t v) {
@@ -300,12 +307,15 @@ int64_t syscall_trace_attach_impl::dispatch_syscall(int64_t sys_nr,
 				state->user_ret = v;
 				state->user_ret_ctx = ctx;
 			});
+#endif
 		run_exit_callbacks(sys_exit_callbacks[sys_nr], ret);
 		run_exit_callbacks(global_exit_callbacks, ret);
+#ifndef BPFTIME_ROOTLESS_MEMORY_OBSERVE_ONLY
 		curr_thread_override_return_callback.reset();
 		if (override_state.is_overrided) {
 			return override_state.user_ret;
 		}
+#endif
 	}
 	return ret;
 }
