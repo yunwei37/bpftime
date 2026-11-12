@@ -7,6 +7,7 @@
 #include <boost/interprocess/detail/utilities.hpp>
 #include <spdlog/spdlog.h>
 #include <cerrno>
+#include <cstddef>
 #include <cstring>
 #include <stdexcept>
 #include <algorithm>
@@ -251,14 +252,27 @@ void *lpm_trie_map_impl::elem_lookup(const void *key)
 		return nullptr;
 	}
 
-	// Copy out to thread-local buffer to avoid concurrent invalidation
-	static thread_local std::vector<uint8_t> tl_value;
-	tl_value.resize(_value_size);
+	// Allocator callbacks can reach this lookup while libc holds an arena
+	// lock. A vector's first use registers a TLS destructor through calloc,
+	// even before resize allocates its storage. Keep small values in trivial
+	// initial-exec TLS so both initialization and copying avoid the allocator.
+	alignas(std::max_align_t) static thread_local uint8_t inline_value[256]
+#if defined(__linux__)
+		__attribute__((tls_model("initial-exec")))
+#endif
+		= {};
 	const uint8_t *src = get_node_value_data(found);
 	if (!src) {
 		errno = ENOENT;
 		return nullptr;
 	}
+	if (_value_size <= sizeof(inline_value)) {
+		std::memcpy(inline_value, src, _value_size);
+		return inline_value;
+	}
+	// Preserve support for larger map values with the existing storage path.
+	static thread_local std::vector<uint8_t> tl_value;
+	tl_value.resize(_value_size);
 	std::memcpy(tl_value.data(), src, _value_size);
 	return tl_value.data();
 }

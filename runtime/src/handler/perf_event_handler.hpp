@@ -193,7 +193,7 @@ struct bpf_perf_event_handler {
 	mutable bool enabled = false;
 	int enable() const
 	{
-		enabled = true;
+		__atomic_store_n(&enabled, true, __ATOMIC_RELEASE);
 		// TODO: implement enable logic.
 		// If This is a server, should inject the agent into the target
 		// process.
@@ -202,8 +202,13 @@ struct bpf_perf_event_handler {
 	}
 	int disable() const
 	{
-		enabled = false;
+		__atomic_store_n(&enabled, false, __ATOMIC_RELEASE);
 		return 0;
+	}
+
+	bool is_enabled() const
+	{
+		return __atomic_load_n(&enabled, __ATOMIC_ACQUIRE);
 	}
 
 	perf_event_data_variant data;

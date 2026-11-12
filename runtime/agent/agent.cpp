@@ -34,6 +34,7 @@
 #include <sys/types.h>
 #endif
 #include "bpftime_shm.hpp"
+#include "cpu_clock_attach.hpp"
 #include <spdlog/spdlog.h>
 #include <spdlog/cfg/env.h>
 #ifdef BPFTIME_ENABLE_CUDA_ATTACH
@@ -83,6 +84,19 @@ static int detach_pipe_fds[2] = { -1, -1 };
 static std::atomic<bool> detach_thread_started{ false };
 static std::mutex detach_mutex;
 static std::atomic<bool> global_ctx_constructed{ false };
+
+#if defined(__linux__) && defined(__x86_64__)
+static cpu_clock::clock_attach *thread_cpu_clock = nullptr;
+
+extern "C" void bpftime_start_thread_cpu_clock()
+{
+	if (thread_cpu_clock) {
+		const auto result = thread_cpu_clock->start();
+		if (result < 0)
+			SPDLOG_WARN("Unable to start thread CPU clock: {}", -result);
+	}
+}
+#endif
 
 union bpf_attach_ctx_holder {
 	bpf_attach_ctx ctx;
@@ -451,6 +465,10 @@ static void stop_auto_refresh_at_exit()
 
 static void stop_syscall_dispatch_at_exit() noexcept
 {
+#if defined(__linux__) && defined(__x86_64__)
+	if (thread_cpu_clock)
+		thread_cpu_clock->shutdown();
+#endif
 #if __linux__ && BPFTIME_BUILD_WITH_LIBBPF
 	try {
 		if (bpftime::attach::global_syscall_trace_attach_impl.has_value() &&
@@ -1010,6 +1028,23 @@ static void bpftime_agent_main_impl(const gchar *data,
 					return priv_data;
 				});
 #endif
+#if defined(__linux__) && defined(__x86_64__)
+			cpu_clock::clock_attach *cpu_clock_impl = nullptr;
+			if (getenv("BPFTIME_EXPERIMENT_THREAD_CPU_CLOCK")) {
+				auto impl = std::make_unique<cpu_clock::clock_attach>();
+				cpu_clock_impl = impl.get();
+				ctx_holder.ctx.register_attach_impl(
+					{ thread_cpu_clock_attach_type }, std::move(impl),
+					[](const std::string_view &arg, int &error)
+						-> std::unique_ptr<attach_private_data> {
+						auto data = std::make_unique<cpu_clock::clock_config>();
+						error = data->initialize_from_string(arg);
+						if (error != 0)
+							return nullptr;
+						return data;
+					});
+			}
+#endif
 			// Register uprobe attach impl
 			ctx_holder.ctx.register_attach_impl(
 				{ ATTACH_UPROBE, ATTACH_URETPROBE,
@@ -1164,6 +1199,9 @@ static void bpftime_agent_main_impl(const gchar *data,
 			/* We don't want our library to be unloaded after we return. */
 			*stay_resident = TRUE;
 			setenv("BPFTIME_USED", "1", 0);
+#if defined(__linux__) && defined(__x86_64__)
+			thread_cpu_clock = cpu_clock_impl;
+#endif
 			__atomic_store_n(&initialized, AGENT_READY,
 					 __ATOMIC_SEQ_CST);
 			try {

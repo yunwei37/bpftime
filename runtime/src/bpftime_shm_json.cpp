@@ -289,7 +289,7 @@ int bpftime::bpftime_export_shm_to_json(const bpftime_shm &shm,
 				{ "type", "bpf_perf_event_handler" },
 				{ "attr", bpf_perf_event_handler_attr_to_json(
 						  perf_handler) },
-				{ "enabled", perf_handler.enabled }
+				{ "enabled", perf_handler.is_enabled() }
 			};
 			SPDLOG_INFO("bpf_perf_event_handler found at {}", i);
 		} else if (std::holds_alternative<epoll_handler>(handler)) {

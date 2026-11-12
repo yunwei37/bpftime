@@ -659,5 +659,12 @@ extern "C" void bpftime_agent_main(const gchar *data, gboolean *stay_resident)
 	{
 		bpftime::setup_syscall_tracer();
 	}
+#if defined(__linux__) && defined(__x86_64__)
+	if (getenv("BPFTIME_EXPERIMENT_THREAD_CPU_CLOCK")) {
+		if (auto start_clock = reinterpret_cast<void (*)()>(
+			    dlsym(next_handle, "bpftime_start_thread_cpu_clock")))
+			start_clock();
+	}
+#endif
 	SPDLOG_DEBUG("Transformer exiting, syscall trace is usable now");
 }

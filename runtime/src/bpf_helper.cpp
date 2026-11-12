@@ -4,6 +4,7 @@
  * All rights reserved.
  */
 #include "bpf_attach_ctx.hpp"
+#include "cpu_clock_replay.hpp"
 #include "handler/map_handler.hpp"
 #include "linux/bpf.h"
 #include <algorithm>
@@ -128,6 +129,20 @@ int64_t bpftime_probe_read(uint64_t dst, int64_t size, uint64_t ptr, uint64_t,
 		SPDLOG_ERROR("Invalid size: {}", size);
 		return -EFAULT;
 	}
+	if (auto *sample = bpftime::cpu_clock::current_sample; sample && size > 0) {
+		const auto length = static_cast<size_t>(size);
+		if (ptr < sample->stack_end &&
+		    (ptr >= sample->stack_begin || length > sample->stack_begin - ptr)) {
+			if (ptr < sample->sampled_sp)
+				return -EFAULT;
+			const auto offset = ptr - sample->sampled_sp;
+			if (offset > sample->stack.size() ||
+			    length > sample->stack.size() - offset)
+				return -EFAULT;
+			std::memcpy((void *)dst, sample->stack.data() + offset, length);
+			return 0;
+		}
+	}
 #ifdef ENABLE_PROBE_READ_CHECK
 	return probe_read_memory((void *)dst, (void *)ptr, (size_t)size) ?
 		       0 :
@@ -251,6 +266,8 @@ static int get_host_nspid(const char *procfs, const char *entry, int fallback)
 uint64_t bpftime_get_current_pid_tgid(uint64_t, uint64_t, uint64_t, uint64_t,
 				      uint64_t)
 {
+	if (auto *sample = bpftime::cpu_clock::current_sample)
+		return sample->pid_tgid;
 #if __linux__
 	static thread_local int cached_local_tgid = -1;
 	static thread_local int tgid = -1;
@@ -295,7 +312,8 @@ uint64_t bpftime_get_current_task(uint64_t, uint64_t, uint64_t, uint64_t,
 			       SIZE_MAX;
 	}();
 	if (tpbase_offset != SIZE_MAX) {
-		void *thread_pointer = __builtin_thread_pointer();
+		void *thread_pointer = bpftime::cpu_clock::current_sample ?
+			nullptr : __builtin_thread_pointer();
 		memcpy(task + tpbase_offset, &thread_pointer,
 		       sizeof(thread_pointer));
 	}
@@ -314,6 +332,8 @@ uint64_t bpf_get_current_uid_gid(uint64_t, uint64_t, uint64_t, uint64_t,
 
 uint64_t bpftime_ktime_get_ns(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t)
 {
+	if (auto *sample = bpftime::cpu_clock::current_sample)
+		return sample->timestamp_ns;
 	auto now = std::chrono::steady_clock::now();
 	auto ns = std::chrono::time_point_cast<std::chrono::nanoseconds>(now);
 	return ns.time_since_epoch().count();
@@ -322,23 +342,20 @@ uint64_t bpftime_ktime_get_ns(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t)
 uint64_t bpftime_get_current_comm(uint64_t buf, uint64_t size, uint64_t,
 				  uint64_t, uint64_t)
 {
-	static std::string filename_buf;
-
-	if (unlikely(filename_buf.empty())) {
-		char strbuf[PATH_MAX];
-
-		auto len = readlink("/proc/self/exe", strbuf,
-				    std::size(strbuf) - 1);
-		if (len == -1)
-			return 1;
-		strbuf[len] = 0;
-		auto str = std::string_view(strbuf);
-		auto last_slash = str.find_last_of('/');
-
-		auto filename = std::string(str.substr(last_slash + 1));
-		filename_buf = filename;
+	// This helper can run from malloc's mmap/brk callback while an arena
+	// lock is held. Preserve the executable-basename behavior without a
+	// lazily allocated string or a process-global initialization race.
+	char strbuf[PATH_MAX];
+	auto len = readlink("/proc/self/exe", strbuf, std::size(strbuf) - 1);
+	if (len == -1)
+		return 1;
+	strbuf[len] = 0;
+	const char *filename = strbuf;
+	for (decltype(len) index = 0; index < len; ++index) {
+		if (strbuf[index] == '/')
+			filename = strbuf + index + 1;
 	}
-	strncpy((char *)(uintptr_t)buf, filename_buf.c_str(), (size_t)size);
+	strncpy((char *)(uintptr_t)buf, filename, (size_t)size);
 	return 0;
 }
 

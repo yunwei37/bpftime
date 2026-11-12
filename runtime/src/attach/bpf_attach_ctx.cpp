@@ -479,8 +479,10 @@ int bpf_attach_ctx::instantiate_perf_event_handler_at(
 		auto &custom_data =
 			std::get<custom_perf_event_data>(perf_handler.data);
 		int err = 0;
-		priv_data = private_data_gen(
-			std::string(custom_data.attach_argument), err);
+		std::string argument(custom_data.attach_argument);
+		if (perf_handler.type == thread_cpu_clock_attach_type)
+			argument += ':' + std::to_string(id);
+		priv_data = private_data_gen(argument, err);
 		if (err < 0) {
 			SPDLOG_ERROR(
 				"Unable to parse private data of attach type {}, err={}, raw string={}",
