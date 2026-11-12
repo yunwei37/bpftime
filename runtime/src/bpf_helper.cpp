@@ -9,6 +9,9 @@
 #include <algorithm>
 #include <stdexcept>
 #include <system_error>
+#if defined(BPFTIME_PROBE_READ_SIGNAL)
+#include "signal_probe.hpp"
+#endif
 #if __APPLE__
 #include <cstdint>
 #include <mach/mach.h>
@@ -128,7 +131,16 @@ int64_t bpftime_probe_read(uint64_t dst, int64_t size, uint64_t ptr, uint64_t,
 		SPDLOG_ERROR("Invalid size: {}", size);
 		return -EFAULT;
 	}
-#ifdef ENABLE_PROBE_READ_CHECK
+#if defined(BPFTIME_PROBE_READ_SIGNAL)
+	// Explicit signal-recovery opt-in takes precedence over the
+	// process_vm_readv check so a single build can keep
+	// ENABLE_PROBE_READ_CHECK for write-side handling while probe reads
+	// use the low-overhead fault-safe backend.
+	return bpftime::signal_probe::protected_copy(
+		       (void *)dst, (void *)ptr, (size_t)size) ?
+		       0 :
+		       -EFAULT;
+#elif defined(ENABLE_PROBE_READ_CHECK)
 	return probe_read_memory((void *)dst, (void *)ptr, (size_t)size) ?
 		       0 :
 		       -EFAULT;

@@ -51,6 +51,10 @@ set(TEST_SOURCES
     tailcall/test_user_to_user_tailcall.cpp
 
 )
+if(BPFTIME_PROBE_READ_SIGNAL)
+  list(APPEND TEST_SOURCES test_signal_probe.cpp)
+endif()
+
 if(${BPFTIME_ENABLE_CUDA_ATTACH})
     list(APPEND TEST_SOURCES cuda/test_cuda_compile.cpp)
 endif()
@@ -63,6 +67,10 @@ endif()
 
 if(ENABLE_PROBE_WRITE_CHECK)
     target_compile_definitions(bpftime_runtime_tests PRIVATE ENABLE_PROBE_WRITE_CHECK=1)
+endif()
+
+if(BPFTIME_PROBE_READ_SIGNAL)
+    target_compile_definitions(bpftime_runtime_tests PRIVATE BPFTIME_PROBE_READ_SIGNAL=1)
 endif()
 
 if(UNIX AND NOT APPLE)

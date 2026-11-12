@@ -102,3 +102,10 @@ option(BPFTIME_BUILD_WITH_LIBBPF "Whether to build with libbpf and other linux h
 option(ENABLE_PROBE_READ_CHECK "Whether to enable probe read check" ON)
 # whether to enable probe write check
 option(ENABLE_PROBE_WRITE_CHECK "Whether to enable probe write check" ON)
+
+# Signal-recovery probe backend: fault-safe bpf_probe_read via sigsetjmp
+# plus a per-thread SIGSEGV alt stack, with no per-read syscall on the happy
+# path. Recovers from any SIGSEGV (including SI_KERNEL from a non-canonical
+# pointer) inside the protected copy window; SIGSEGV elsewhere keeps the
+# previous host disposition. Linux x86_64/AArch64 only.
+option(BPFTIME_PROBE_READ_SIGNAL "Use sigsetjmp/SIGSEGV recovery for probe read" OFF)

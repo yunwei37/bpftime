@@ -183,6 +183,22 @@ if(ENABLE_PROBE_WRITE_CHECK)
   target_compile_definitions(runtime PRIVATE ENABLE_PROBE_WRITE_CHECK=1)
 endif()
 
+if(BPFTIME_PROBE_READ_SIGNAL)
+  if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|aarch64|arm64")))
+    message(FATAL_ERROR "BPFTIME_PROBE_READ_SIGNAL is only supported on Linux x86_64/AArch64")
+  endif()
+  # The compile definition is applied inside runtime/CMakeLists.txt (where the
+  # runtime target is created); setting it here after add_subdirectory(runtime)
+  # does not reach that subdirectory's compile rules.
+endif()
+
+# Product builds must never ship the raw-memcpy probe path: a bad target
+# pointer then SIGSEGVs the traced process (fiber stale-frame crash). Require
+# at least one fault-safe backend. Locally override with -DBPFTIME_ALLOW_UNSAFE_PROBE=ON.
+if(NOT (ENABLE_PROBE_READ_CHECK OR BPFTIME_PROBE_READ_SIGNAL) AND NOT BPFTIME_ALLOW_UNSAFE_PROBE)
+  message(FATAL_ERROR "Unsafe probe backend: enable ENABLE_PROBE_READ_CHECK or BPFTIME_PROBE_READ_SIGNAL (or set BPFTIME_ALLOW_UNSAFE_PROBE=ON to override)")
+endif()
+
 # add to single archive if option is enabled
 if(${BPFTIME_BUILD_STATIC_LIB})
   if(${BPFTIME_UBPF_JIT})
