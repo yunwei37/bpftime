@@ -10,6 +10,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <ucontext.h>
 
 namespace
 {
@@ -92,8 +93,25 @@ void segv_backtrace(int sig, siginfo_t *info, void *ctx)
 	(void)!write(diag_fd, "SEGVHIT\n", 9);
 	diag_line("SEGV", sig, (long long)(intptr_t)(info ? info->si_addr : 0),
 		  (long long)getppid());
-	Frame *f = (Frame *)__builtin_frame_address(0);
-	for (int depth = 0; depth < 12 && f; ++depth) {
+	auto *uc = (ucontext_t *)ctx;
+	uintptr_t fault_rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+	uintptr_t fault_rbp = (uintptr_t)uc->uc_mcontext.gregs[REG_RBP];
+	// First entry: the exact faulting instruction resolved via dladdr.
+	{
+		char buf[320]; char *w = buf; char *e = buf + sizeof(buf);
+		w = emit_int(w, e, (long long)getpid()); if (w < e-1) *w++ = ' ';
+		emit_str(w, e, "SEGVRIP"); if (w < e-1) *w++ = ' ';
+		Dl_info di {};
+		if (dladdr((void *)fault_rip, &di) && di.dli_sname) {
+			emit_str(w, e, di.dli_sname); if (w < e-1) *w++ = '+';
+			w = emit_int(w, e, (long long)((char*)fault_rip-(char*)di.dli_saddr));
+			if (di.dli_fname) { if (w < e-1) *w++ = ' '; emit_str(w, e, di.dli_fname); }
+		} else emit_str(w, e, "UNKNOWN");
+		if (w < e-1) *w++ = '\n';
+		(void)!write(diag_fd, buf, (size_t)(w - buf));
+	}
+	Frame *f = (Frame *)fault_rbp;
+	for (int depth = 0; depth < 14 && f; ++depth) {
 		uintptr_t ret = f->ret;
 		char buf[320];
 		char *p = buf;
