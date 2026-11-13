@@ -94,12 +94,16 @@ bool initialize()
 	// Linux force_sig for a synchronous fault resets the disposition to
 	// SIG_DFL when the signal is blocked, killing the process before our
 	// handler can run. Refuse while SIGSEGV/SIGBUS is blocked so the
-	// caller uses process_vm_readv; a later availability check retries.
+	// caller uses process_vm_readv. Return without touching init_ok: a
+	// blocked rearm must not tear down a previously working disposition.
+	// The mask is checked only at (re)initialization, not per copy, since
+	// a per-copy rt_sigprocmask would defeat the zero-syscall success
+	// path; BPF helpers run under the normal unblocked thread mask.
 	sigset_t cur;
 	if (pthread_sigmask(SIG_SETMASK, nullptr, &cur) != 0 ||
 	    sigismember(&cur, SIGSEGV) == 1 ||
 	    sigismember(&cur, SIGBUS) == 1)
-		return init_ok = false;
+		return false;
 	struct sigaction sa = {};
 	sa.sa_sigaction = fault_handler;
 	sa.sa_flags = SA_SIGINFO | SA_ONSTACK;

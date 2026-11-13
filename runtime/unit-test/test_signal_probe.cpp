@@ -210,13 +210,30 @@ TEST_CASE("blocked SIGSEGV refuses the backend and the syscall fallback holds",
 		if (process_vm_fallback(
 			    dst, reinterpret_cast<void *>(kNonCanonical), 8))
 			_exit(4);
-		if (pthread_sigmask(SIG_SETMASK, &old, nullptr) != 0)
-			_exit(5);
-		if (bpftime::signal_probe::protected_copy(
-			    dst, reinterpret_cast<void *>(kNonCanonical),
-			    8) != 0)
-			_exit(6);
-		_exit(0);
+	if (pthread_sigmask(SIG_SETMASK, &old, nullptr) != 0)
+		_exit(5);
+	if (bpftime::signal_probe::protected_copy(
+		    dst, reinterpret_cast<void *>(kNonCanonical),
+		    8) != 0)
+		_exit(6);
+	// A blocked rearm after successful initialization must neither clobber
+	// the working disposition nor leave the backend disabled afterwards.
+	char src[8] = {};
+	if (bpftime::signal_probe::protected_copy(dst, src, sizeof src) != 1)
+		_exit(7);
+	if (pthread_sigmask(SIG_BLOCK, &mask, nullptr) != 0)
+		_exit(8);
+	bpftime::signal_probe::rearm_handler(); // blocked: must be a no-op
+	if (pthread_sigmask(SIG_SETMASK, &old, nullptr) != 0)
+		_exit(9);
+	if (!bpftime::signal_probe::backend_available())
+		_exit(10);
+	if (bpftime::signal_probe::protected_copy(dst, src, sizeof src) !=
+		    1 ||
+	    bpftime::signal_probe::protected_copy(
+		    dst, reinterpret_cast<void *>(kNonCanonical), 8) != 0)
+		_exit(11);
+	_exit(0);
 	}
 	int status = 0;
 	REQUIRE(waitpid(child, &status, 0) == child);
