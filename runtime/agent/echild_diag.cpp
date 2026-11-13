@@ -1,9 +1,10 @@
 // DIAGNOSTIC ONLY (branch diag-echild, never merge): trace SIGCHLD, fork,
-// wait4 and caller frames to locate the ECHILD race behind PR #736.
+// wait4 and resolve caller symbols to locate the ECHILD race behind PR #736.
 #include <cerrno>
 #include <csignal>
 #include <cstdint>
 #include <cstring>
+#include <dlfcn.h>
 #include <pthread.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -33,6 +34,12 @@ char *emit_int(char *p, char *end, long long v)
 	return p;
 }
 
+void emit_str(char *&p, char *end, const char *s)
+{
+	while (s && *s && p < end - 1)
+		*p++ = *s++;
+}
+
 // One line = one write(): atomic on a pipe/tty, immune to thread interleaving.
 void diag_line(const char *tag, long long a, long long b, long long c)
 {
@@ -40,21 +47,41 @@ void diag_line(const char *tag, long long a, long long b, long long c)
 	char *p = buf;
 	char *end = buf + sizeof(buf);
 	p = emit_int(p, end, (long long)getpid());
-	if (p < end - 1)
-		*p++ = ' ';
-	while (*tag && p < end - 1)
-		*p++ = *tag++;
-	if (p < end - 1)
-		*p++ = ' ';
+	if (p < end - 1) *p++ = ' ';
+	emit_str(p, end, tag);
+	if (p < end - 1) *p++ = ' ';
 	p = emit_int(p, end, a);
-	if (p < end - 1)
-		*p++ = ' ';
+	if (p < end - 1) *p++ = ' ';
 	p = emit_int(p, end, b);
-	if (p < end - 1)
-		*p++ = ' ';
+	if (p < end - 1) *p++ = ' ';
 	p = emit_int(p, end, c);
-	if (p < end - 1)
-		*p++ = '\n';
+	if (p < end - 1) *p++ = '\n';
+	(void)!write(diag_fd, buf, (size_t)(p - buf));
+}
+
+void diag_sym(const char *tag, void *addr)
+{
+	Dl_info info {};
+	char buf[320];
+	char *p = buf;
+	char *end = buf + sizeof(buf);
+	p = emit_int(p, end, (long long)getpid());
+	if (p < end - 1) *p++ = ' ';
+	emit_str(p, end, tag);
+	if (p < end - 1) *p++ = ' ';
+	if (dladdr(addr, &info) && info.dli_sname) {
+		emit_str(p, end, info.dli_sname);
+		if (p < end - 1) *p++ = '+';
+		p = emit_int(p, end,
+			     (long long)((char *)addr - (char *)info.dli_saddr));
+		if (info.dli_fname) {
+			if (p < end - 1) *p++ = ' ';
+			emit_str(p, end, info.dli_fname);
+		}
+	} else {
+		emit_str(p, end, "UNKNOWN");
+	}
+	if (p < end - 1) *p++ = '\n';
 	(void)!write(diag_fd, buf, (size_t)(p - buf));
 }
 
@@ -121,8 +148,11 @@ extern "C" void echild_diag_wait4(long long pid, long long statusp,
 				 long long options, long long rusage,
 				 long long f0, long long f1)
 {
+	(void)f0;
+	(void)f1;
 	diag_line("WAIT4", pid, options, statusp);
-	diag_line("W4FRAME01", f0, f1, (long long)__builtin_return_address(2));
-	diag_line("W4FRAME23", (long long)__builtin_return_address(3),
-		  (long long)__builtin_return_address(4), rusage);
+	void *ra3 = __builtin_return_address(3);
+	void *ra2 = __builtin_return_address(2);
+	diag_sym("SYM_LIBC", ra3);
+	diag_sym("SYM_TRAMP", ra2);
 }
