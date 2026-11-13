@@ -1466,8 +1466,14 @@ int syscall_context::handle_epoll_wait(int epfd, epoll_event *evt,
 				orig_epoll_wait_fn(epfd, evt, maxevents, 0);
 			if (kernel_result != 0)
 				return kernel_result;
-			if (timeout == 0)
-				return 0;
+			if (timeout == 0) {
+				// Userspace sources (ringbuf, software perf events) live
+				// only in shared memory, not in the kernel epfd. A
+				// non-blocking poll must still consult the userspace epoll
+				// once, otherwise those events are invisible to
+				// timeout==0 consumers (including epoll_pwait callers).
+				return bpftime_epoll_wait(epfd, evt, maxevents, 0);
+			}
 			int userspace_timeout = 1;
 			if (timeout > 0) {
 				auto elapsed = duration_cast<milliseconds>(
