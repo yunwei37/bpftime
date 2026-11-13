@@ -1,6 +1,6 @@
-// DIAGNOSTIC ONLY (branch diag-echild, never merge): scan the user stack for
-// return addresses to find the C caller of libc wait4 across the
-// omit-frame-pointer glibc leaf.
+// DIAGNOSTIC ONLY (branch diag-echild, never merge): per-thread syscall ring
+// to decide whether the garbage wait4 is a corrupted syscall number or a real
+// wait call, plus full register dump on the wait4 path.
 #include <cerrno>
 #include <csignal>
 #include <cstdint>
@@ -39,33 +39,32 @@ void diag_line(const char *tag, long long a, long long b, long long c)
 	(void)!write(diag_fd, buf, (size_t)(p - buf));
 }
 
-void scan_stack(const char *tag, long long pid_arg)
+// Per-thread ring of recent syscall numbers.
+constexpr int RING = 16;
+thread_local long ring_nr[RING];
+thread_local int ring_idx = 0;
+thread_local int ring_count = 0;
+
+void ring_record(long nr)
 {
-	diag_line(tag, pid_arg, 0, 0);
-	volatile uintptr_t sp = (uintptr_t)__builtin_frame_address(0);
-	// scan a 4KB window upward from current frame
-	const int n = 512;
-	for (int i = 0; i < n; ++i) {
-		uintptr_t val = *(volatile uintptr_t *)(sp + (uintptr_t)i * 8);
-		Dl_info info {};
-		if (dladdr((void *)val, &info) && info.dli_sname &&
-		    (strstr(info.dli_fname ? info.dli_fname : "", ".so") ||
-		     strstr(info.dli_fname ? info.dli_fname : "", "timeout") ||
-		     strstr(info.dli_fname ? info.dli_fname : "", "dd"))) {
-			char buf[320]; char *p = buf; char *end = buf + sizeof(buf);
-			p = emit_int(p, end, (long long)getpid());
-			if (p < end - 1) *p++ = ' ';
-			emit_str(p, end, "STACK");
-			if (p < end - 1) *p++ = ' ';
-			p = emit_int(p, end, i); if (p < end - 1) *p++ = ' ';
-			emit_str(p, end, info.dli_sname);
-			if (p < end - 1) *p++ = '+';
-			p = emit_int(p, end, (long long)((char *)val - (char *)info.dli_saddr));
-			if (info.dli_fname) { if (p < end - 1) *p++ = ' '; emit_str(p, end, info.dli_fname); }
-			if (p < end - 1) *p++ = '\n';
-			(void)!write(diag_fd, buf, (size_t)(p - buf));
-		}
+	ring_nr[ring_idx] = nr;
+	ring_idx = (ring_idx + 1) % RING;
+	if (ring_count < RING) ++ring_count;
+}
+void ring_dump()
+{
+	char buf[256]; char *p = buf; char *end = buf + sizeof(buf);
+	p = emit_int(p, end, (long long)getpid());
+	if (p < end - 1) *p++ = ' ';
+	emit_str(p, end, "RING");
+	int start = ring_count < RING ? 0 : ring_idx;
+	int n = ring_count < RING ? ring_count : RING;
+	for (int k = 0; k < n && p < end - 8; ++k) {
+		if (p < end - 1) *p++ = ' ';
+		p = emit_int(p, end, ring_nr[(start + k) % RING]);
 	}
+	if (p < end - 1) *p++ = '\n';
+	(void)!write(diag_fd, buf, (size_t)(p - buf));
 }
 
 struct sigaction old_action;
@@ -105,6 +104,12 @@ struct diag_init_t {
 } diag_init_instance;
 } // namespace
 
+// Called from dispatch for EVERY syscall (entry), to feed the ring.
+extern "C" void echild_diag_syscall_enter(long long nr)
+{
+	ring_record(nr);
+}
+
 extern "C" void echild_diag_note(const char *tag, long long a, long long b,
 				 long long c) { diag_line(tag, a, b, c); }
 
@@ -112,9 +117,7 @@ extern "C" void echild_diag_wait4(long long pid, long long statusp,
 				 long long options, long long rusage,
 				 long long f0, long long f1)
 {
-	(void)statusp; (void)options; (void)rusage; (void)f0; (void)f1;
-	diag_line("WAIT4", pid, 0, 0);
-	// Real child pids in CI are small; garbage pointer-as-pid values are huge.
-	if (pid > 1000000)
-		scan_stack("GARBAGE_SCAN", pid);
+	(void)statusp; (void)rusage; (void)f0; (void)f1;
+	diag_line("WAIT4", pid, options, 0);
+	ring_dump();
 }
