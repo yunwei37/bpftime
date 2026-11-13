@@ -10,7 +10,7 @@
 #include <cerrno>
 #include <cstring>
 #include <signal.h>
-#include <sys/mman.h>
+#include <ctime>
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
@@ -43,7 +43,7 @@ int process_vm_fallback(void *dst, const void *src, size_t n)
 
 bool in_fault_table(const char *pc)
 {
-	for (auto **entry = bpftime_pc_fault_table;
+	for (const char *const *entry = bpftime_pc_fault_table;
 	     entry != bpftime_pc_fault_table_end; ++entry) {
 		if (pc == *entry)
 			return true;
@@ -163,7 +163,7 @@ TEST_CASE("fault table contains exactly the two access instructions",
 {
 	size_t entries = 0;
 	bool saw_load = false, saw_store = false;
-	for (auto **entry = bpftime_pc_fault_table;
+	for (const char *const *entry = bpftime_pc_fault_table;
 	     entry != bpftime_pc_fault_table_end; ++entry) {
 		++entries;
 		saw_load |= *entry == bpftime_pc_probe_load;
@@ -242,9 +242,9 @@ TEST_CASE("asynchronous SIGSEGV inside an active window reaches the host",
 		});
 		for (int i = 0; i < 50; ++i) {
 			pthread_kill(worker.native_handle(), SIGSEGV);
-			// Give the asynchronous signal time to be delivered.
-			for (volatile int spin = 0; spin < 100000; ++spin)
-				;
+			// Let the asynchronous signal be delivered and handled.
+			timespec gap{ 0, 2 * 1000 * 1000 };
+			nanosleep(&gap, nullptr);
 		}
 		worker.join();
 		// All asynchronous signals (si_code SI_TKILL/SI_USER) must be
