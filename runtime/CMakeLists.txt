@@ -102,6 +102,14 @@ if(${BPFTIME_ENABLE_CUDA_ATTACH})
   list(APPEND sources src/bpf_map/gpu/nv_gpu_shared_array_host_map.cpp)
 endif()
 
+if(BPFTIME_PROBE_READ_SIGNAL)
+  enable_language(ASM)
+  list(APPEND sources
+    src/signal_probe.cpp
+    src/signal_probe_asm.S
+  )
+endif()
+
 if(UNIX AND NOT APPLE AND BPFTIME_BUILD_WITH_LIBBPF)
   list(APPEND sources
     src/bpf_map/shared/array_map_kernel_user.cpp
@@ -124,6 +132,9 @@ add_library(
   ${sources}
 )
 set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_STANDARD 20)
+if(BPFTIME_PROBE_READ_SIGNAL)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE BPFTIME_PROBE_READ_SIGNAL=1)
+endif()
 if(${BPFTIME_LLVM_JIT})
   target_compile_definitions(${PROJECT_NAME} PUBLIC BPFTIME_LLVM_JIT=1)
 else()

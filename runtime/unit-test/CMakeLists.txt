@@ -51,6 +51,10 @@ set(TEST_SOURCES
     tailcall/test_prog_array_thread_local.cpp
 
 )
+
+if(BPFTIME_PROBE_READ_SIGNAL)
+  list(APPEND TEST_SOURCES test_signal_probe.cpp)
+endif()
 # These tests instantiate attach::frida_attach_impl directly, so they only
 # build when the frida backend is available (it is off on riscv64).
 if(BPFTIME_ENABLE_FRIDA)
@@ -83,6 +87,10 @@ endif()
 
 if(ENABLE_PROBE_WRITE_CHECK)
     target_compile_definitions(bpftime_runtime_tests PRIVATE ENABLE_PROBE_WRITE_CHECK=1)
+endif()
+
+if(BPFTIME_PROBE_READ_SIGNAL)
+  target_compile_definitions(bpftime_runtime_tests PRIVATE BPFTIME_PROBE_READ_SIGNAL=1)
 endif()
 
 if(UNIX AND NOT APPLE)

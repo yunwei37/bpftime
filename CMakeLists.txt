@@ -183,6 +183,19 @@ add_subdirectory(vm)
 
 add_subdirectory(attach)
 
+if(BPFTIME_PROBE_READ_SIGNAL)
+  if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64"))
+    message(FATAL_ERROR "BPFTIME_PROBE_READ_SIGNAL currently supports only Linux x86_64 (the annotated copy region is architecture-specific)")
+  endif()
+endif()
+
+# Product builds must never ship the raw-memcpy probe path: a bad target
+# pointer then terminates the traced process. Require at least one
+# fault-safe backend; BPFTIME_ALLOW_UNSAFE_PROBE is a deliberate local override.
+if(NOT (ENABLE_PROBE_READ_CHECK OR BPFTIME_PROBE_READ_SIGNAL) AND NOT BPFTIME_ALLOW_UNSAFE_PROBE)
+  message(FATAL_ERROR "Unsafe probe backend: enable ENABLE_PROBE_READ_CHECK or BPFTIME_PROBE_READ_SIGNAL, or set BPFTIME_ALLOW_UNSAFE_PROBE=ON to override")
+endif()
+
 add_subdirectory(runtime)
 
 option(BPFTIME_BUILD_RUNTIME_LIBRARY_EXAMPLE "Build the direct runtime-library example" OFF)

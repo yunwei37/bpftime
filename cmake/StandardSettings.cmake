@@ -110,3 +110,7 @@ option(BPFTIME_BUILD_WITH_LIBBPF "Whether to build with libbpf and other linux h
 option(ENABLE_PROBE_READ_CHECK "Whether to enable probe read check" ON)
 # whether to enable probe write check
 option(ENABLE_PROBE_WRITE_CHECK "Whether to enable probe write check" ON)
+# fault-safe probe read via fixed fault-PC -> recovery-PC signal redirect
+option(BPFTIME_PROBE_READ_SIGNAL "Use a signal-recovery backend for fault-safe probe reads" OFF)
+# local escape hatch for builds that deliberately accept the raw-memcpy path
+option(BPFTIME_ALLOW_UNSAFE_PROBE "Allow building without any fault-safe probe-read backend" OFF)
