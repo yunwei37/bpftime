@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 namespace
 {
@@ -96,10 +97,25 @@ struct diag_init_t {
 			diag_line("INIT_SIGACTION_FAIL", (long long)errno, 0, 0);
 		pthread_atfork(atfork_prepare, atfork_parent, atfork_child);
 		diag_line("INIT_DONE", (long long)getppid(), 0, 0);
+		int maps = open("/proc/self/maps", O_RDONLY);
+		if (maps >= 0) {
+			char mb[4096];
+			ssize_t n;
+			while ((n = read(maps, mb, sizeof(mb))) > 0)
+				(void)!write(diag_fd, mb, (size_t)n);
+			close(maps);
+		}
 	}
 } diag_init_instance;
 } // namespace
 
+extern "C" void echild_diag_wait4(long long pid, long long statusp,
+				 long long options, long long rusage,
+				 long long ret0, long long ret1)
+{
+	diag_line("WAIT4_ENTER", pid, options, statusp);
+	diag_line("WAIT4_RETS", ret0, ret1, rusage);
+}
 extern "C" void echild_diag_note(const char *tag, long long a, long long b,
 				 long long c)
 {
