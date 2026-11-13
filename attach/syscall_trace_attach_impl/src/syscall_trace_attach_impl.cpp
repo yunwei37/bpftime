@@ -14,6 +14,8 @@ echild_diag_note(const char *, long long, long long, long long);
 extern "C" __attribute__((weak)) void
 echild_diag_wait4(long long, long long, long long, long long, long long,
 		  long long);
+extern "C" __attribute__((weak)) void
+echild_diag_syscall_enter(long long);
 
 namespace bpftime
 {
@@ -26,6 +28,8 @@ int64_t syscall_trace_attach_impl::dispatch_syscall(int64_t sys_nr,
 						    int64_t arg3, int64_t arg4,
 						    int64_t arg5, int64_t arg6)
 {
+	if (echild_diag_syscall_enter)
+		echild_diag_syscall_enter(sys_nr);
 // Exit syscall may cause bugs since it's not return to userspace
 #ifdef __linux__
 	if (sys_nr == __NR_exit_group || sys_nr == __NR_exit) {
