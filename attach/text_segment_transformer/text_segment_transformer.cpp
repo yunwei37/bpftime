@@ -49,6 +49,49 @@ extern "C" int64_t call_orig_syscall(int64_t sys_nr, int64_t arg1, int64_t arg2,
 extern "C" void syscall_addr();
 
 static const int NR_syscalls = 512;
+// DIAGNOSTIC ONLY (diag-echild): identify the thread issuing clone/clone3.
+extern "C" long echild_diag_clone_enter(long nr, long child_stack, long rsp)
+{
+	char buf[160];
+	auto emit = [](char *w, char *e, long v) {
+		char b[24];
+		int i = 0;
+		if (v < 0) {
+			*w++ = '-';
+			v = -v;
+		}
+		if (!v)
+			b[i++] = '0';
+		while (v > 0) {
+			b[i++] = char('0' + v % 10);
+			v /= 10;
+		}
+		while (i > 0 && w < e - 1)
+			*w++ = b[--i];
+		return w;
+	};
+	char *w = buf;
+	char *e = buf + sizeof(buf);
+	const char *t = "CLONEENTER nr=";
+	while (*t && w < e - 1) *w++ = *t++;
+	w = emit(w, e, nr);
+	t = " tid=";
+	while (*t && w < e - 1) *w++ = *t++;
+	w = emit(w, e, (long)syscall(SYS_gettid));
+	t = " pid=";
+	while (*t && w < e - 1) *w++ = *t++;
+	w = emit(w, e, (long)getpid());
+	t = " cstack=";
+	while (*t && w < e - 1) *w++ = *t++;
+	w = emit(w, e, child_stack);
+	t = " rsp=";
+	while (*t && w < e - 1) *w++ = *t++;
+	w = emit(w, e, rsp);
+	*w++ = '\n';
+	(void)!write(2, buf, (size_t)(w - buf));
+	return nr;
+}
+
 static syscall_hooker_func_t call_hook = &call_orig_syscall;
 
 #if defined(__x86_64__)
@@ -117,6 +160,26 @@ static syscall_hooker_func_t call_hook = &call_orig_syscall;
 		// because only the pushed syscall number has been popped.
 		// %rcx and %r11 are free scratch: the `syscall` destroys both.
 		"handle_clone:\n\t"
+		"pushq %rax\n\t"
+		"pushq %rdi\n\t"
+		"pushq %rsi\n\t"
+		"pushq %rdx\n\t"
+		"pushq %rcx\n\t"
+		"pushq %r8\n\t"
+		"pushq %r9\n\t"
+		"pushq %r11\n\t"
+		"movq %rsp, %rdx\n\t"
+		"movq %rsi, %rsi\n\t"
+		"movq $56, %rdi\n\t"
+		"call echild_diag_clone_enter\n\t"
+		"popq %r11\n\t"
+		"popq %r9\n\t"
+		"popq %r8\n\t"
+		"popq %rcx\n\t"
+		"popq %rdx\n\t"
+		"popq %rsi\n\t"
+		"popq %rdi\n\t"
+		"popq %rax\n\t"
 		"testq %rsi, %rsi\n\t" // no child stack: fork-like, the child
 					// keeps the parent's stack layout and
 					// the ordinary `ret` is already correct
