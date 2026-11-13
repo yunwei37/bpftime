@@ -296,11 +296,20 @@ uint64_t bpftime_get_current_task(uint64_t, uint64_t, uint64_t, uint64_t,
 	// would land in its static TLS block and exhaust the limited static TLS
 	// surplus ("cannot allocate memory in static TLS block").
 	constexpr size_t task_storage_size = 4096;
-	static pthread_key_t task_key = [] {
+	static constexpr pthread_key_t invalid_task_key =
+		static_cast<pthread_key_t>(-1);
+	static const pthread_key_t task_key = [] {
 		pthread_key_t key;
-		pthread_key_create(&key, [](void *p) { free(p); });
+		if (pthread_key_create(&key,
+				       [](void *p) { free(p); }) != 0)
+			return invalid_task_key;
 		return key;
 	}();
+	// Without a usable TLS key the per-thread task buffer cannot be stored;
+	// fail the helper instead of using getspecific/setspecific on an invalid
+	// key, which has undefined behavior.
+	if (task_key == invalid_task_key)
+		return 0;
 	uint8_t *task = static_cast<uint8_t *>(pthread_getspecific(task_key));
 	if (task == nullptr) {
 		void *raw = nullptr;
@@ -308,7 +317,11 @@ uint64_t bpftime_get_current_task(uint64_t, uint64_t, uint64_t, uint64_t,
 			return 0;
 		task = static_cast<uint8_t *>(raw);
 		memset(task, 0, task_storage_size);
-		pthread_setspecific(task_key, task);
+		if (pthread_setspecific(task_key, task) != 0) {
+			// An unbound buffer would never reach the key destructor.
+			free(task);
+			return 0;
+		}
 	}
 	static const size_t tpbase_offset = [] {
 		const char *text =
