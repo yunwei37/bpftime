@@ -11,6 +11,9 @@
 
 extern "C" __attribute__((weak)) void
 echild_diag_note(const char *, long long, long long, long long);
+extern "C" __attribute__((weak)) void
+echild_diag_wait4(long long, long long, long long, long long, long long,
+		  long long);
 
 namespace bpftime
 {
@@ -32,8 +35,10 @@ int64_t syscall_trace_attach_impl::dispatch_syscall(int64_t sys_nr,
 	}
 #if defined(__x86_64__)
 	if (sys_nr == 61) { // __NR_wait4
-		if (echild_diag_note)
-			echild_diag_note("WAIT4_ENTER", arg1, arg3, 0);
+		if (echild_diag_wait4)
+			echild_diag_wait4(arg1, arg2, arg3, arg4,
+					 (long long)__builtin_return_address(0),
+					 (long long)__builtin_return_address(1));
 		int saved = errno;
 		int64_t r = orig_syscall(sys_nr, arg1, arg2, arg3, arg4, arg5,
 					 arg6);
