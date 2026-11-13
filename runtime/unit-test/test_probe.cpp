@@ -8,6 +8,7 @@
 #include <thread>
 #include <unistd.h>
 #include <signal.h>
+#include "signal_probe.hpp"
 
 static volatile sig_atomic_t forwarded_sigsegv = 0;
 
@@ -224,7 +225,7 @@ TEST_CASE("Test Probe read/write size valid or not ")
 	}
 }
 
-TEST_CASE("Test default SIGSEGV handler is preserved")
+TEST_CASE("Test default SIGSEGV handler semantics are preserved")
 {
 	pid_t child = fork();
 	REQUIRE(child >= 0);
@@ -241,14 +242,29 @@ TEST_CASE("Test default SIGSEGV handler is preserved")
 				       (uint64_t)&src, 0, 0) != 0)
 			_exit(3);
 
+#if BPFTIME_HAVE_SIGNAL_PROBE_BACKEND
+		// The signal backend owns the process-wide disposition, so
+		// the readback is no longer SIG_DFL. The preserved contract
+		// is behavioral: a foreign fault must chain to the saved
+		// SIG_DFL disposition and terminate with SIGSEGV, exactly as
+		// it would without bpftime.
+		raise(SIGSEGV);
+		_exit(5); // not reached
+#else
 		struct sigaction current_action = {};
 		if (sigaction(SIGSEGV, nullptr, &current_action) != 0)
 			_exit(4);
 		_exit(current_action.sa_handler == SIG_DFL ? 0 : 5);
+#endif
 	}
 
 	int status = 0;
 	REQUIRE(waitpid(child, &status, 0) == child);
+#if BPFTIME_HAVE_SIGNAL_PROBE_BACKEND
+	REQUIRE(WIFSIGNALED(status));
+	REQUIRE(WTERMSIG(status) == SIGSEGV);
+#else
 	REQUIRE(WIFEXITED(status));
 	REQUIRE(WEXITSTATUS(status) == 0);
+#endif
 }

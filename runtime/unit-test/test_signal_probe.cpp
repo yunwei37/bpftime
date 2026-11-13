@@ -65,7 +65,8 @@ TEST_CASE_METHOD(signal_backend_fixture, "valid and cross-page copies succeed",
 	char two[2] = {};
 	REQUIRE(bpftime::signal_probe::protected_copy(
 			two, static_cast<char *>(pages) + 4095, 2) == 1);
-	REQUIRE(two[0] == 0x11 && two[1] == 0x22);
+	REQUIRE(two[0] == 0x11);
+	REQUIRE(two[1] == 0x22);
 	REQUIRE(munmap(pages, 8192) == 0);
 }
 
