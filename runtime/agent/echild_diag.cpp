@@ -1,6 +1,5 @@
-// DIAGNOSTIC ONLY (branch diag-echild, never merge): per-thread syscall ring
-// to decide whether the garbage wait4 is a corrupted syscall number or a real
-// wait call, plus full register dump on the wait4 path.
+// DIAGNOSTIC ONLY (branch diag-echild, never merge): confirm whether the
+// garbage-wait4 process ever execve'd, plus parentage and thread identity.
 #include <cerrno>
 #include <csignal>
 #include <cstdint>
@@ -14,6 +13,8 @@
 namespace
 {
 int diag_fd = STDERR_FILENO;
+long g_execve_count = 0;   // successful execve would replace image anyway
+long g_syscall_count = 0;
 
 char *emit_int(char *p, char *end, long long v)
 {
@@ -38,32 +39,18 @@ void diag_line(const char *tag, long long a, long long b, long long c)
 	p = emit_int(p, end, c); if (p < end - 1) *p++ = '\n';
 	(void)!write(diag_fd, buf, (size_t)(p - buf));
 }
-
-// Per-thread ring of recent syscall numbers.
-constexpr int RING = 16;
-thread_local long ring_nr[RING];
-thread_local int ring_idx = 0;
-thread_local int ring_count = 0;
-
-void ring_record(long nr)
-{
-	ring_nr[ring_idx] = nr;
-	ring_idx = (ring_idx + 1) % RING;
-	if (ring_count < RING) ++ring_count;
-}
-void ring_dump()
+void diag_identity(const char *tag, long long pid_arg)
 {
 	char buf[256]; char *p = buf; char *end = buf + sizeof(buf);
 	p = emit_int(p, end, (long long)getpid());
 	if (p < end - 1) *p++ = ' ';
-	emit_str(p, end, "RING");
-	int start = ring_count < RING ? 0 : ring_idx;
-	int n = ring_count < RING ? ring_count : RING;
-	for (int k = 0; k < n && p < end - 8; ++k) {
-		if (p < end - 1) *p++ = ' ';
-		p = emit_int(p, end, ring_nr[(start + k) % RING]);
-	}
-	if (p < end - 1) *p++ = '\n';
+	emit_str(p, end, tag);
+	if (p < end - 1) *p++ = ' ';
+	p = emit_int(p, end, pid_arg); if (p < end - 1) *p++ = ' ';
+	p = emit_int(p, end, (long long)getppid()); if (p < end - 1) *p++ = ' ';
+	p = emit_int(p, end, (long long)syscall(SYS_gettid)); if (p < end - 1) *p++ = ' ';
+	p = emit_int(p, end, g_execve_count); if (p < end - 1) *p++ = ' ';
+	p = emit_int(p, end, g_syscall_count); if (p < end - 1) *p++ = '\n';
 	(void)!write(diag_fd, buf, (size_t)(p - buf));
 }
 
@@ -104,20 +91,14 @@ struct diag_init_t {
 } diag_init_instance;
 } // namespace
 
-// Called from dispatch for EVERY syscall (entry), to feed the ring.
 extern "C" void echild_diag_syscall_enter(long long nr)
 {
-	ring_record(nr);
+	++g_syscall_count;
+	if (nr == 59 || nr == 322) // execve / execveat
+		++g_execve_count;
 }
-
 extern "C" void echild_diag_note(const char *tag, long long a, long long b,
 				 long long c) { diag_line(tag, a, b, c); }
-
-extern "C" void echild_diag_wait4(long long pid, long long statusp,
-				 long long options, long long rusage,
-				 long long f0, long long f1)
-{
-	(void)statusp; (void)rusage; (void)f0; (void)f1;
-	diag_line("WAIT4", pid, options, 0);
-	ring_dump();
-}
+extern "C" void echild_diag_wait4(long long pid, long long s, long long o,
+				 long long r, long long f0, long long f1)
+{ (void)s;(void)o;(void)r;(void)f0;(void)f1; diag_identity("W4ID", pid); }
