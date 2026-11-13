@@ -27,6 +27,7 @@ set(TEST_SOURCES
     maps/test_stack_map.cpp
     maps/test_bloom_filter_map.cpp
     maps/test_lpm_trie_map.cpp
+    maps/test_ringbuf_map.cpp
 
     maps/test_lru_var_hash_map.cpp
     maps/test_lru_hash_map.cpp
@@ -47,6 +48,7 @@ set(TEST_SOURCES
 
     tailcall/test_user_to_kernel_tailcall.cpp
     tailcall/test_user_to_user_tailcall.cpp
+    tailcall/test_prog_array_thread_local.cpp
 
 )
 # These tests instantiate attach::frida_attach_impl directly, so they only
