@@ -10,6 +10,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <cstdio>
 #include <ucontext.h>
 
 namespace
