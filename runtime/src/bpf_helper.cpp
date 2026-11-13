@@ -127,11 +127,12 @@ int64_t bpftime_probe_read(uint64_t dst, int64_t size, uint64_t ptr, uint64_t,
 		return -EFAULT;
 	}
 #if BPFTIME_HAVE_SIGNAL_PROBE_BACKEND
-	// The signal-recovery backend takes precedence: zero syscalls on the
-	// successful path and recovered faults map to -EFAULT. If it is
-	// unavailable (for example SIGSEGV/SIGBUS is blocked, where Linux
-	// force_sig would reset the disposition to SIG_DFL), fall through to
-	// the process_vm_readv check when it is compiled in; otherwise refuse
+	// Scoped signal-recovery backend: the SIGSEGV/SIGBUS disposition is
+	// installed only for the copy and restored before returning. A
+	// recovered synchronous access fault maps to -EFAULT; the destination
+	// may be partially written on failure. If the backend is unavailable
+	// in this thread (blocked fault signals, no signal stack), fall
+	// through to process_vm_readv when compiled in; refuse otherwise
 	// instead of risking an unprotected memcpy.
 	int signal_rc = bpftime::signal_probe::protected_copy(
 		(void *)dst, (void *)ptr, (size_t)size);

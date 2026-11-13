@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
-// Fault-injection tests for the fixed fault-PC -> recovery-PC probe-read
-// backend. Only compiled when BPFTIME_PROBE_READ_SIGNAL=1.
+// Fault-injection tests for the scoped fixed fault-PC probe-read backend.
+// Only compiled when BPFTIME_PROBE_READ_SIGNAL=1.
 #include "signal_probe.hpp"
 
 #if BPFTIME_HAVE_SIGNAL_PROBE_BACKEND
@@ -19,20 +19,16 @@
 #include <unistd.h>
 #include <vector>
 
+extern "C" {
+extern const char bpftime_pc_probe_load[];
+extern const char bpftime_pc_probe_store[];
+extern const char bpftime_pc_probe_recovery[];
+extern const char *const bpftime_pc_fault_table[];
+extern const char *const bpftime_pc_fault_table_end[];
+}
+
 namespace
 {
-// Catch2 installs its own SIGSEGV fatal-condition handler around each case.
-// Re-assert our disposition at case start so recovery is tested against the
-// exact handler ordering a real embedding relies on; the Catch2 disposition
-// becomes the previous one and stays chained for foreign faults.
-struct signal_backend_fixture {
-	signal_backend_fixture()
-	{
-		REQUIRE(bpftime::signal_probe::backend_available());
-		bpftime::signal_probe::rearm_handler();
-	}
-};
-
 constexpr uintptr_t kNonCanonical = 0x1824000000000000ULL;
 
 int process_vm_fallback(void *dst, const void *src, size_t n)
@@ -44,14 +40,24 @@ int process_vm_fallback(void *dst, const void *src, size_t n)
 		       1 :
 		       0;
 }
+
+bool in_fault_table(const char *pc)
+{
+	for (auto **entry = bpftime_pc_fault_table;
+	     entry != bpftime_pc_fault_table_end; ++entry) {
+		if (pc == *entry)
+			return true;
+	}
+	return false;
+}
 } // namespace
 
-TEST_CASE_METHOD(signal_backend_fixture, "valid and cross-page copies succeed",
-		 "[probe-read-signal]")
+TEST_CASE("valid and cross-page copies succeed", "[probe-read-signal]")
 {
 	char dst[32] = {};
 	char src[32];
 	std::memset(src, 0x5a, sizeof src);
+	REQUIRE(bpftime::signal_probe::backend_available());
 	REQUIRE(bpftime::signal_probe::protected_copy(dst, src, 1) == 1);
 	REQUIRE(bpftime::signal_probe::protected_copy(dst, src, sizeof src) ==
 		1);
@@ -70,9 +76,8 @@ TEST_CASE_METHOD(signal_backend_fixture, "valid and cross-page copies succeed",
 	REQUIRE(munmap(pages, 8192) == 0);
 }
 
-TEST_CASE_METHOD(signal_backend_fixture,
-		 "null, unmapped, PROT_NONE and non-canonical pointers recover",
-		 "[probe-read-signal]")
+TEST_CASE("null, unmapped, PROT_NONE and non-canonical pointers recover",
+	  "[probe-read-signal]")
 {
 	char dst[16] = {};
 	REQUIRE(bpftime::signal_probe::protected_copy(dst, nullptr, 8) == 0);
@@ -93,9 +98,8 @@ TEST_CASE_METHOD(signal_backend_fixture,
 	REQUIRE(munmap(q, 4096) == 0);
 }
 
-TEST_CASE_METHOD(signal_backend_fixture,
-		 "read straddling a revoked page boundary recovers",
-		 "[probe-read-signal]")
+TEST_CASE("read straddling a revoked page boundary recovers",
+	  "[probe-read-signal]")
 {
 	char dst[4] = { 9, 9, 9, 9 };
 	void *p = mmap(nullptr, 8192, PROT_READ | PROT_WRITE,
@@ -107,9 +111,8 @@ TEST_CASE_METHOD(signal_backend_fixture,
 	REQUIRE(munmap(p, 8192) == 0);
 }
 
-TEST_CASE_METHOD(signal_backend_fixture,
-		 "repeated recovery keeps working and errno is preserved",
-		 "[probe-read-signal]")
+TEST_CASE("repeated recovery keeps working and errno is preserved",
+	  "[probe-read-signal]")
 {
 	char dst[8];
 	errno = 999;
@@ -123,9 +126,8 @@ TEST_CASE_METHOD(signal_backend_fixture,
 	REQUIRE(errno == 999);
 }
 
-TEST_CASE_METHOD(signal_backend_fixture,
-		 "concurrent threads each recover independently",
-		 "[probe-read-signal]")
+TEST_CASE("concurrent threads each recover independently",
+	  "[probe-read-signal]")
 {
 	constexpr int kThreads = 8;
 	constexpr int kIters = 20000;
@@ -156,7 +158,28 @@ TEST_CASE_METHOD(signal_backend_fixture,
 	REQUIRE(good.load() == kThreads * kIters);
 }
 
-TEST_CASE("foreign SIGSEGV keeps the previous host disposition",
+TEST_CASE("fault table contains exactly the two access instructions",
+	  "[probe-read-signal]")
+{
+	size_t entries = 0;
+	bool saw_load = false, saw_store = false;
+	for (auto **entry = bpftime_pc_fault_table;
+	     entry != bpftime_pc_fault_table_end; ++entry) {
+		++entries;
+		saw_load |= *entry == bpftime_pc_probe_load;
+		saw_store |= *entry == bpftime_pc_probe_store;
+	}
+	REQUIRE(entries == 2);
+	REQUIRE(saw_load);
+	REQUIRE(saw_store);
+	// Recovery entry and an ordinary data address must not be members.
+	REQUIRE_FALSE(in_fault_table(bpftime_pc_probe_recovery));
+	char stack_marker = 0;
+	REQUIRE_FALSE(in_fault_table(
+		reinterpret_cast<const char *>(&stack_marker)));
+}
+
+TEST_CASE("disposition is restored after every protected copy",
 	  "[probe-read-signal]")
 {
 	pid_t child = fork();
@@ -164,22 +187,29 @@ TEST_CASE("foreign SIGSEGV keeps the previous host disposition",
 	if (child == 0) {
 		rlimit no_core{ 0, 0 };
 		setrlimit(RLIMIT_CORE, &no_core);
-		struct sigaction sa = {};
-		sa.sa_handler = [](int) { _exit(77); };
-		sigemptyset(&sa.sa_mask);
-		if (sigaction(SIGSEGV, &sa, nullptr) != 0)
+		struct sigaction host = {};
+		host.sa_handler = [](int) { _exit(77); };
+		sigemptyset(&host.sa_mask);
+		if (sigaction(SIGSEGV, &host, nullptr) != 0)
 			_exit(2);
-		if (!bpftime::signal_probe::backend_available())
-			_exit(3);
-		bpftime::signal_probe::rearm_handler();
 		char dst[8];
-		if (bpftime::signal_probe::protected_copy(
-			    dst, reinterpret_cast<void *>(0x1000),
-			    sizeof dst) != 0)
-			_exit(4);
-		volatile int *foreign = reinterpret_cast<volatile int *>(0x1000);
-		(void)*foreign; // must chain to the host handler -> exit 77
-		_exit(5);
+		int src = 1;
+		void *bad = reinterpret_cast<void *>(kNonCanonical);
+		for (int i = 0; i < 100; ++i) {
+			if (bpftime::signal_probe::protected_copy(
+				    dst, &src, sizeof src) != 1)
+				_exit(3);
+			if (bpftime::signal_probe::protected_copy(dst, bad,
+								  8) != 0)
+				_exit(4);
+			struct sigaction current = {};
+			if (sigaction(SIGSEGV, nullptr, &current) != 0)
+				_exit(5);
+			if (current.sa_handler != host.sa_handler)
+				_exit(6);
+		}
+		raise(SIGSEGV); // reaches the host handler -> exit 77
+		_exit(7);
 	}
 	int status = 0;
 	REQUIRE(waitpid(child, &status, 0) == child);
@@ -187,7 +217,48 @@ TEST_CASE("foreign SIGSEGV keeps the previous host disposition",
 	REQUIRE(WEXITSTATUS(status) == 77);
 }
 
-TEST_CASE("blocked SIGSEGV refuses the backend and the syscall fallback holds",
+TEST_CASE("asynchronous SIGSEGV inside an active window reaches the host",
+	  "[probe-read-signal]")
+{
+	pid_t child = fork();
+	REQUIRE(child >= 0);
+	if (child == 0) {
+		rlimit no_core{ 0, 0 };
+		setrlimit(RLIMIT_CORE, &no_core);
+		static std::atomic<int> host_hits{ 0 };
+		struct sigaction host = {};
+		host.sa_handler = [](int) { ++host_hits; };
+		sigemptyset(&host.sa_mask);
+		if (sigaction(SIGSEGV, &host, nullptr) != 0)
+			_exit(2);
+		std::thread worker([&] {
+			char dst[8];
+			int src = 3;
+			for (int i = 0; i < 200000; ++i) {
+				if (bpftime::signal_probe::protected_copy(
+					    dst, &src, sizeof src) != 1)
+					std::abort();
+			}
+		});
+		for (int i = 0; i < 50; ++i) {
+			pthread_kill(worker.native_handle(), SIGSEGV);
+			// Give the asynchronous signal time to be delivered.
+			for (volatile int spin = 0; spin < 100000; ++spin)
+				;
+		}
+		worker.join();
+		// All asynchronous signals (si_code SI_TKILL/SI_USER) must be
+		// forwarded to the host handler; none may be swallowed as a
+		// copy fault, and every valid copy must still succeed.
+		_exit(host_hits.load() == 50 ? 0 : 8);
+	}
+	int status = 0;
+	REQUIRE(waitpid(child, &status, 0) == child);
+	REQUIRE(WIFEXITED(status));
+	REQUIRE(WEXITSTATUS(status) == 0);
+}
+
+TEST_CASE("blocked SIGSEGV refuses, falls back, and recovers after unblock",
 	  "[probe-read-signal]")
 {
 	pid_t child = fork();
@@ -201,8 +272,6 @@ TEST_CASE("blocked SIGSEGV refuses the backend and the syscall fallback holds",
 		if (pthread_sigmask(SIG_BLOCK, &mask, &old) != 0)
 			_exit(2);
 		char dst[8] = {};
-		// A prior blocked attempt must not permanently disable the
-		// backend, but while blocked the call has to refuse.
 		if (bpftime::signal_probe::protected_copy(
 			    dst, reinterpret_cast<void *>(kNonCanonical),
 			    8) != -1)
@@ -210,35 +279,51 @@ TEST_CASE("blocked SIGSEGV refuses the backend and the syscall fallback holds",
 		if (process_vm_fallback(
 			    dst, reinterpret_cast<void *>(kNonCanonical), 8))
 			_exit(4);
-	if (pthread_sigmask(SIG_SETMASK, &old, nullptr) != 0)
-		_exit(5);
-	if (bpftime::signal_probe::protected_copy(
-		    dst, reinterpret_cast<void *>(kNonCanonical),
-		    8) != 0)
-		_exit(6);
-	// A blocked rearm after successful initialization must neither clobber
-	// the working disposition nor leave the backend disabled afterwards.
-	char src[8] = {};
-	if (bpftime::signal_probe::protected_copy(dst, src, sizeof src) != 1)
-		_exit(7);
-	if (pthread_sigmask(SIG_BLOCK, &mask, nullptr) != 0)
-		_exit(8);
-	bpftime::signal_probe::rearm_handler(); // blocked: must be a no-op
-	if (pthread_sigmask(SIG_SETMASK, &old, nullptr) != 0)
-		_exit(9);
-	if (!bpftime::signal_probe::backend_available())
-		_exit(10);
-	if (bpftime::signal_probe::protected_copy(dst, src, sizeof src) !=
-		    1 ||
-	    bpftime::signal_probe::protected_copy(
-		    dst, reinterpret_cast<void *>(kNonCanonical), 8) != 0)
-		_exit(11);
-	_exit(0);
+		if (pthread_sigmask(SIG_SETMASK, &old, nullptr) != 0)
+			_exit(5);
+		// The blocked result was not cached: the backend works again.
+		if (bpftime::signal_probe::protected_copy(
+			    dst, reinterpret_cast<void *>(kNonCanonical),
+			    8) != 0)
+			_exit(6);
+		char src[8] = {};
+		if (bpftime::signal_probe::protected_copy(dst, src,
+							   sizeof src) != 1)
+			_exit(7);
+		_exit(0);
 	}
 	int status = 0;
 	REQUIRE(waitpid(child, &status, 0) == child);
 	REQUIRE(WIFEXITED(status));
 	REQUIRE(WEXITSTATUS(status) == 0);
+}
+
+TEST_CASE("foreign fault with host handler keeps fatal chain semantics",
+	  "[probe-read-signal]")
+{
+	pid_t child = fork();
+	REQUIRE(child >= 0);
+	if (child == 0) {
+		rlimit no_core{ 0, 0 };
+		setrlimit(RLIMIT_CORE, &no_core);
+		struct sigaction host = {};
+		host.sa_handler = [](int) { _exit(77); };
+		sigemptyset(&host.sa_mask);
+		if (sigaction(SIGSEGV, &host, nullptr) != 0)
+			_exit(2);
+		char dst[8];
+		if (bpftime::signal_probe::protected_copy(
+			    dst, reinterpret_cast<void *>(0x1000),
+			    sizeof dst) != 0)
+			_exit(3);
+		volatile int *foreign = reinterpret_cast<volatile int *>(0x1000);
+		(void)*foreign; // synchronous foreign fault -> host -> exit 77
+		_exit(4);
+	}
+	int status = 0;
+	REQUIRE(waitpid(child, &status, 0) == child);
+	REQUIRE(WIFEXITED(status));
+	REQUIRE(WEXITSTATUS(status) == 77);
 }
 
 #endif // BPFTIME_HAVE_SIGNAL_PROBE_BACKEND
