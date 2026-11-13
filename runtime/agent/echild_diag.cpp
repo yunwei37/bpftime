@@ -1,5 +1,5 @@
-// DIAGNOSTIC ONLY (branch diag-echild, never merge): trace SIGCHLD, fork,
-// wait4 and resolve caller symbols to locate the ECHILD race behind PR #736.
+// DIAGNOSTIC ONLY (branch diag-echild, never merge): walk RBP frame chain
+// across the libc wait4 boundary to find the C caller passing a garbage pid.
 #include <cerrno>
 #include <csignal>
 #include <cstdint>
@@ -18,34 +18,18 @@ char *emit_int(char *p, char *end, long long v)
 {
 	char buf[24];
 	int i = 0;
-	if (v < 0) {
-		if (p < end - 1)
-			*p++ = '-';
-		v = -v;
-	}
-	if (v == 0)
-		buf[i++] = '0';
-	while (v > 0) {
-		buf[i++] = char('0' + v % 10);
-		v /= 10;
-	}
-	while (i > 0 && p < end - 1)
-		*p++ = buf[--i];
+	if (v < 0) { if (p < end - 1) *p++ = '-'; v = -v; }
+	if (v == 0) buf[i++] = '0';
+	while (v > 0) { buf[i++] = char('0' + v % 10); v /= 10; }
+	while (i > 0 && p < end - 1) *p++ = buf[--i];
 	return p;
 }
-
 void emit_str(char *&p, char *end, const char *s)
-{
-	while (s && *s && p < end - 1)
-		*p++ = *s++;
-}
+{ while (s && *s && p < end - 1) *p++ = *s++; }
 
-// One line = one write(): atomic on a pipe/tty, immune to thread interleaving.
 void diag_line(const char *tag, long long a, long long b, long long c)
 {
-	char buf[256];
-	char *p = buf;
-	char *end = buf + sizeof(buf);
+	char buf[256]; char *p = buf; char *end = buf + sizeof(buf);
 	p = emit_int(p, end, (long long)getpid());
 	if (p < end - 1) *p++ = ' ';
 	emit_str(p, end, tag);
@@ -59,38 +43,41 @@ void diag_line(const char *tag, long long a, long long b, long long c)
 	(void)!write(diag_fd, buf, (size_t)(p - buf));
 }
 
-void diag_sym(const char *tag, void *addr)
+struct Frame { uintptr_t rbp; uintptr_t ret; };
+
+void dump_chain(const char *tag, long long pid_arg)
 {
-	Dl_info info {};
-	char buf[320];
-	char *p = buf;
-	char *end = buf + sizeof(buf);
-	p = emit_int(p, end, (long long)getpid());
-	if (p < end - 1) *p++ = ' ';
-	emit_str(p, end, tag);
-	if (p < end - 1) *p++ = ' ';
-	if (dladdr(addr, &info) && info.dli_sname) {
-		emit_str(p, end, info.dli_sname);
-		if (p < end - 1) *p++ = '+';
-		p = emit_int(p, end,
-			     (long long)((char *)addr - (char *)info.dli_saddr));
-		if (info.dli_fname) {
-			if (p < end - 1) *p++ = ' ';
-			emit_str(p, end, info.dli_fname);
-		}
-	} else {
-		emit_str(p, end, "UNKNOWN");
+	diag_line(tag, pid_arg, 0, 0);
+	Frame *f = (Frame *)__builtin_frame_address(0);
+	for (int depth = 0; depth < 10 && f; ++depth) {
+		uintptr_t ret = f->ret;
+		char buf[320]; char *p = buf; char *end = buf + sizeof(buf);
+		p = emit_int(p, end, (long long)getpid());
+		if (p < end - 1) *p++ = ' ';
+		emit_str(p, end, "FRAME");
+		if (p < end - 1) *p++ = ' ';
+		p = emit_int(p, end, depth);
+		if (p < end - 1) *p++ = ' ';
+		Dl_info info {};
+		if (dladdr((void *)ret, &info) && info.dli_sname) {
+			emit_str(p, end, info.dli_sname);
+			if (p < end - 1) *p++ = '+';
+			p = emit_int(p, end, (long long)((char *)ret - (char *)info.dli_saddr));
+			if (info.dli_fname) { if (p < end - 1) *p++ = ' '; emit_str(p, end, info.dli_fname); }
+		} else emit_str(p, end, "UNKNOWN");
+		if (p < end - 1) *p++ = '\n';
+		(void)!write(diag_fd, buf, (size_t)(p - buf));
+		uintptr_t next = f->rbp;
+		// basic sanity: next frame pointer must be higher and aligned-ish
+		if (next == 0 || next <= (uintptr_t)f || (next & 7) != 0) break;
+		f = (Frame *)next;
 	}
-	if (p < end - 1) *p++ = '\n';
-	(void)!write(diag_fd, buf, (size_t)(p - buf));
 }
 
 struct sigaction old_action;
-
 void diag_sigchld(int sig, siginfo_t *info, void *ctx)
 {
-	(void)sig;
-	(void)ctx;
+	(void)sig; (void)ctx;
 	diag_line("SIGCHLD", info ? (long long)info->si_pid : -1,
 		  info ? (long long)info->si_code : -99,
 		  info ? (long long)info->si_status : -99);
@@ -98,15 +85,12 @@ void diag_sigchld(int sig, siginfo_t *info, void *ctx)
 	auto ign = reinterpret_cast<void *>(SIG_IGN);
 	if (old_action.sa_flags & SA_SIGINFO) {
 		auto h = reinterpret_cast<void *>(old_action.sa_sigaction);
-		if (h && h != dfl && h != ign)
-			old_action.sa_sigaction(sig, info, ctx);
+		if (h && h != dfl && h != ign) old_action.sa_sigaction(sig, info, ctx);
 	} else {
 		auto h = reinterpret_cast<void *>(old_action.sa_handler);
-		if (h && h != dfl && h != ign)
-			old_action.sa_handler(sig);
+		if (h && h != dfl && h != ign) old_action.sa_handler(sig);
 	}
 }
-
 void atfork_prepare() { diag_line("ATFORK_PREPARE", 0, 0, 0); }
 void atfork_parent() { diag_line("ATFORK_PARENT", 0, 0, 0); }
 void atfork_child() { diag_line("ATFORK_CHILD", 0, 0, 0); }
@@ -126,33 +110,17 @@ struct diag_init_t {
 			diag_line("INIT_SIGACTION_FAIL", (long long)errno, 0, 0);
 		pthread_atfork(atfork_prepare, atfork_parent, atfork_child);
 		diag_line("INIT_DONE", (long long)getppid(), 0, 0);
-		int maps = open("/proc/self/maps", O_RDONLY);
-		if (maps >= 0) {
-			char mb[4096];
-			ssize_t n;
-			while ((n = read(maps, mb, sizeof(mb))) > 0)
-				(void)!write(diag_fd, mb, (size_t)n);
-			close(maps);
-		}
 	}
 } diag_init_instance;
 } // namespace
 
 extern "C" void echild_diag_note(const char *tag, long long a, long long b,
-				 long long c)
-{
-	diag_line(tag, a, b, c);
-}
+				 long long c) { diag_line(tag, a, b, c); }
 
 extern "C" void echild_diag_wait4(long long pid, long long statusp,
 				 long long options, long long rusage,
 				 long long f0, long long f1)
 {
-	(void)f0;
-	(void)f1;
-	diag_line("WAIT4", pid, options, statusp);
-	void *ra3 = __builtin_return_address(3);
-	void *ra2 = __builtin_return_address(2);
-	diag_sym("SYM_LIBC", ra3);
-	diag_sym("SYM_TRAMP", ra2);
+	(void)statusp; (void)options; (void)rusage; (void)f0; (void)f1;
+	dump_chain("WAIT4CHAIN", pid);
 }
