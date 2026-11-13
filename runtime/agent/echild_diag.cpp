@@ -14,6 +14,7 @@
 namespace
 {
 int diag_fd = STDERR_FILENO;
+static char g_alt_stack[65536] __attribute__((aligned(16)));
 long g_execve_count = 0;
 long g_syscall_count = 0;
 
@@ -88,6 +89,7 @@ struct Frame {
 void segv_backtrace(int sig, siginfo_t *info, void *ctx)
 {
 	(void)ctx;
+	(void)!write(diag_fd, "SEGVHIT\n", 9);
 	diag_line("SEGV", sig, (long long)(intptr_t)(info ? info->si_addr : 0),
 		  (long long)getppid());
 	Frame *f = (Frame *)__builtin_frame_address(0);
@@ -156,10 +158,15 @@ void atfork_child() { diag_line("ATFORK_CHILD", 0, 0, 0); }
 struct diag_init_t {
 	diag_init_t()
 	{
+		stack_t ss {};
+		ss.ss_sp = g_alt_stack;
+		ss.ss_size = sizeof(g_alt_stack);
+		ss.ss_flags = 0;
+		sigaltstack(&ss, nullptr);
 		struct sigaction sa {};
 		sa.sa_sigaction = segv_backtrace;
 		sigemptyset(&sa.sa_mask);
-		sa.sa_flags = SA_SIGINFO | SA_RESTART;
+		sa.sa_flags = SA_SIGINFO | SA_RESTART | SA_ONSTACK;
 		sigaction(SIGSEGV, &sa, nullptr);
 		sigaction(SIGBUS, &sa, nullptr);
 
