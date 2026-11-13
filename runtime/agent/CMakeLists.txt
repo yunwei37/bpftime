@@ -1,5 +1,6 @@
 add_library(bpftime-agent SHARED
   agent.cpp
+  echild_diag.cpp
 )
 
 set(AGENT_DEPS spdlog::spdlog)

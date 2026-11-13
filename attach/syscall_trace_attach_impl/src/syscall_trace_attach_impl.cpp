@@ -9,6 +9,9 @@
 #include <asm/unistd.h>  // For architecture-specific syscall numbers
 #endif
 
+extern "C" __attribute__((weak)) void
+echild_diag_note(const char *, long long, long long, long long);
+
 namespace bpftime
 {
 namespace attach
@@ -22,8 +25,24 @@ int64_t syscall_trace_attach_impl::dispatch_syscall(int64_t sys_nr,
 {
 // Exit syscall may cause bugs since it's not return to userspace
 #ifdef __linux__
-	if (sys_nr == __NR_exit_group || sys_nr == __NR_exit)
+	if (sys_nr == __NR_exit_group || sys_nr == __NR_exit) {
+		if (echild_diag_note)
+			echild_diag_note("EXIT", sys_nr, arg1, 0);
 		return orig_syscall(sys_nr, arg1, arg2, arg3, arg4, arg5, arg6);
+	}
+#if defined(__x86_64__)
+	if (sys_nr == 61) { // __NR_wait4
+		if (echild_diag_note)
+			echild_diag_note("WAIT4_ENTER", arg1, arg3, 0);
+		int saved = errno;
+		int64_t r = orig_syscall(sys_nr, arg1, arg2, arg3, arg4, arg5,
+					 arg6);
+		int e = errno;
+		if (echild_diag_note)
+			echild_diag_note("WAIT4_EXIT", r, e, saved);
+		return r;
+	}
+#endif
 #endif
 	SPDLOG_DEBUG("Syscall callback {} {} {} {} {} {} {}", sys_nr, arg1,
 		     arg2, arg3, arg4, arg5, arg6);
