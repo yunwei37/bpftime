@@ -10,6 +10,7 @@
 #include <cerrno>
 #include <cstring>
 #include <signal.h>
+#include <sys/mman.h>
 #include <ctime>
 #include <sys/resource.h>
 #include <sys/syscall.h>
