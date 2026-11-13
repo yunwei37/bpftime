@@ -96,6 +96,9 @@ void segv_backtrace(int sig, siginfo_t *info, void *ctx)
 	auto *uc = (ucontext_t *)ctx;
 	uintptr_t fault_rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
 	uintptr_t fault_rbp = (uintptr_t)uc->uc_mcontext.gregs[REG_RBP];
+	uintptr_t fault_rsp = (uintptr_t)uc->uc_mcontext.gregs[REG_RSP];
+	diag_line("SEGVREG", (long long)fault_rip, (long long)fault_rbp,
+		  (long long)fault_rsp);
 	// First entry: the exact faulting instruction resolved via dladdr.
 	{
 		char buf[320]; char *w = buf; char *e = buf + sizeof(buf);
@@ -109,6 +112,25 @@ void segv_backtrace(int sig, siginfo_t *info, void *ctx)
 		} else emit_str(w, e, "UNKNOWN");
 		if (w < e-1) *w++ = '\n';
 		(void)!write(diag_fd, buf, (size_t)(w - buf));
+	}
+	// Dump the mapping containing RIP for ownership without dladdr.
+	{
+		int mf = open("/proc/self/maps", O_RDONLY);
+		if (mf >= 0) {
+			char mb[512];
+			ssize_t n;
+			while ((n = read(mf, mb, sizeof(mb) - 1)) > 0) {
+				mb[n] = 0;
+				unsigned long a = 0, b = 0;
+				if (sscanf(mb, "%lx-%lx", &a, &b) == 2 &&
+				    a <= fault_rip && fault_rip < b) {
+					(void)!write(diag_fd, "RIPMAP ", 7);
+					(void)!write(diag_fd, mb, (size_t)n);
+					if (mb[n-1] != '\n') (void)!write(diag_fd, "\n", 1);
+				}
+			}
+			close(mf);
+		}
 	}
 	Frame *f = (Frame *)fault_rbp;
 	for (int depth = 0; depth < 14 && f; ++depth) {
