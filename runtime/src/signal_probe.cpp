@@ -16,6 +16,8 @@
 #include <cstdint>
 #include <mutex>
 #include <signal.h>
+#include <sys/mman.h>
+#include <unistd.h>
 extern "C" {
 int bpftime_pc_safe_copy_asm(void *dst, const void *src, size_t n);
 extern const char bpftime_pc_probe_load[];
