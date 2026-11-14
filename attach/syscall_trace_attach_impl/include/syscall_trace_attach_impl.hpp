@@ -49,6 +49,15 @@ struct syscall_trace_attach_entry {
 extern std::optional<class syscall_trace_attach_impl *>
 	global_syscall_trace_attach_impl;
 
+// Re-entrancy depth for syscall dispatch. A plain process-global counter (not
+// thread_local, no RAII guard object): the dispatch entry is reached through
+// the text segment transformer's assembly trampoline, and a thread_local or
+// a non-trivially-destructed local changed the hot function's unwind/stack
+// frame and crashed the high-frequency bpftrace victim. The tracepoint
+// workload is single-threaded per victim; a plain int with manual inc/dec
+// keeps the frame indistinguishable from master. See issue #165.
+extern int syscall_dispatch_depth;
+
 // Used by text segment transformer to setup syscall callback
 // Text segment transformer should provide a pointer to its syscall executor
 // function. syscall trace attach impl will save the original syscall function,

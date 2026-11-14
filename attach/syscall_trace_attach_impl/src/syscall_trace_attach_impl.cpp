@@ -15,6 +15,9 @@ namespace attach
 {
 std::optional<syscall_trace_attach_impl *> global_syscall_trace_attach_impl;
 
+// Definition of the plain re-entrancy depth declared in the header.
+int syscall_dispatch_depth = 0;
+
 int64_t syscall_trace_attach_impl::dispatch_syscall(int64_t sys_nr,
 						    int64_t arg1, int64_t arg2,
 						    int64_t arg3, int64_t arg4,
@@ -25,6 +28,14 @@ int64_t syscall_trace_attach_impl::dispatch_syscall(int64_t sys_nr,
 	if (sys_nr == __NR_exit_group || sys_nr == __NR_exit)
 		return orig_syscall(sys_nr, arg1, arg2, arg3, arg4, arg5, arg6);
 #endif
+	// Manual depth tracking with no guard object: nested dispatch (a syscall
+	// issued from inside a running callback) runs only the original syscall.
+	bool nested = (syscall_dispatch_depth++ != 0);
+	if (nested) {
+		--syscall_dispatch_depth;
+		return orig_syscall(sys_nr, arg1, arg2, arg3, arg4, arg5,
+				    arg6);
+	}
 	SPDLOG_DEBUG("Syscall callback {} {} {} {} {} {} {}", sys_nr, arg1,
 		     arg2, arg3, arg4, arg5, arg6);
 	// Indicate whether the return value is overridden
@@ -67,31 +78,35 @@ int64_t syscall_trace_attach_impl::dispatch_syscall(int64_t sys_nr,
 		run_callbacks(global_enter_callbacks, ctx);
 	}
 	curr_thread_override_return_callback.reset();
+	int64_t result;
 	if (is_overrided) {
-		return user_ret;
+		result = user_ret;
+	} else {
+		curr_thread_override_return_callback =
+			override_return_set_callback([&](uint64_t ctx,
+							 uint64_t v) {
+				is_overrided = true;
+				user_ret = v;
+				user_ret_ctx = ctx;
+			});
+		SPDLOG_DEBUG("executing original syscall");
+		result = orig_syscall(sys_nr, arg1, arg2, arg3, arg4, arg5,
+					     arg6);
+		if (!sys_exit_callbacks[sys_nr].empty() ||
+		    !global_exit_callbacks.empty()) {
+			trace_event_raw_sys_exit ctx;
+			memset(&ctx, 0, sizeof(ctx));
+			ctx.id = sys_nr;
+			ctx.ret = result;
+			run_callbacks(sys_exit_callbacks[sys_nr], ctx);
+			run_callbacks(global_exit_callbacks, ctx);
+		}
+		curr_thread_override_return_callback.reset();
+		if (is_overrided)
+			result = user_ret;
 	}
-	curr_thread_override_return_callback =
-		override_return_set_callback([&](uint64_t ctx, uint64_t v) {
-			is_overrided = true;
-			user_ret = v;
-			user_ret_ctx = ctx;
-		});
-	SPDLOG_DEBUG("executing original syscall");
-	int64_t ret = orig_syscall(sys_nr, arg1, arg2, arg3, arg4, arg5, arg6);
-	if (!sys_exit_callbacks[sys_nr].empty() ||
-	    !global_exit_callbacks.empty()) {
-		trace_event_raw_sys_exit ctx;
-		memset(&ctx, 0, sizeof(ctx));
-		ctx.id = sys_nr;
-		ctx.ret = ret;
-		run_callbacks(sys_exit_callbacks[sys_nr], ctx);
-		run_callbacks(global_exit_callbacks, ctx);
-	}
-	curr_thread_override_return_callback.reset();
-	if (is_overrided) {
-		return user_ret;
-	}
-	return ret;
+	--syscall_dispatch_depth;
+	return result;
 }
 
 int syscall_trace_attach_impl::detach_by_id(int id)
