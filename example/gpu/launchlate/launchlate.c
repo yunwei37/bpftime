@@ -306,10 +306,16 @@ int main(int argc, char **argv)
 
 	printf("\nMonitoring CUDA kernel launch latency (uprobe: %s:%s)... Hit Ctrl-C to end.\n",
 	       binary_path, func_name);
+	/* stdout is fully buffered when redirected to a file; flush the banner
+	 * immediately and keep printing the histogram in the loop (each
+	 * print_histogram fflushes) so a 'timeout -s SIGKILL' still leaves the
+	 * "Monitoring ..." output and periodic samples for the CI grep. */
+	fflush(stdout);
 
-	while (!exiting)
+	while (!exiting) {
 		sleep(1);
-	print_histogram(skel);
+		print_histogram(skel);
+	}
 
 cleanup:
 	free(func_name);
