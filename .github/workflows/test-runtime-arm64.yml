@@ -21,6 +21,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
+# This workflow only checks out code, builds it, and runs tests.
+permissions:
+  contents: read
+
 env:
   BPFTIME_VM_NAME: llvm
 
