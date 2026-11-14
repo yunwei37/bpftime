@@ -42,16 +42,10 @@ int64_t syscall_trace_attach_impl::dispatch_syscall(int64_t sys_nr,
 		return orig_syscall(sys_nr, arg1, arg2, arg3, arg4, arg5, arg6);
 #endif
 	dispatch_depth_guard depth_guard;
-	if (depth_guard.nested) {
-		// Nested dispatch (e.g. bpf()/map syscalls issued from inside a
-		// running callback) must run only the original syscall. Do not log
-		// here: on a high-frequency tracepoint this branch executes at the
-		// full event rate and a per-event SPDLOG_DEBUG (enabled in CI)
-		// floods the console and can re-enter the logger from a probe hot
-		// path, which crashed the victim in the bpftrace one-liner tests.
-		return orig_syscall(sys_nr, arg1, arg2, arg3, arg4, arg5,
-				    arg6);
-	}
+	// DIAGNOSTIC: track depth but do NOT skip nested dispatch, isolating
+	// whether the crash comes from the TLS variable itself or the
+	// skip-callback control flow.
+	(void)depth_guard.nested;
 	SPDLOG_DEBUG("Syscall callback {} {} {} {} {} {} {}", sys_nr, arg1,
 		     arg2, arg3, arg4, arg5, arg6);
 	// Indicate whether the return value is overridden
