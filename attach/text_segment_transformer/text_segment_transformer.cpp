@@ -50,6 +50,10 @@ extern "C" void syscall_addr();
 
 static const int NR_syscalls = 512;
 static syscall_hooker_func_t call_hook = &call_orig_syscall;
+extern "C" {
+thread_local uintptr_t bpftime_vfork_return_ip = 0;
+thread_local unsigned bpftime_syscall_dispatch_active = 0;
+}
 
 #if defined(__x86_64__)
 // `used` keeps this function in the object under -flto: LTO sees a body whose
@@ -64,8 +68,8 @@ static syscall_hooker_func_t call_hook = &call_orig_syscall;
 		"pop %rax\n\t" // Restore the saved rax, which is the syscall
 			       // number
 		"cmp $15, %rax\n\t" // Special handing for rt_sigreturn, they
-				    // don't need to be traced
-		"je handle_sigreturn\n\t"
+					    // don't need to be traced
+		"je handle_rt_sigreturn\n\t"
 		// clone and clone3 return TWICE. The child resumes at the `ret`
 		// of call_orig_syscall, but on its own fresh stack, where no
 		// return address was ever pushed -- it pops whatever the thread
@@ -78,8 +82,25 @@ static syscall_hooker_func_t call_hook = &call_orig_syscall;
 		"je handle_clone\n\t"
 		"cmp $435, %rax\n\t" // SYS_clone3
 		"je handle_clone3\n\t"
-		"movq (%rsp), %rcx\n\t"
-		"pushq %rbp\n\t"
+		// fork and vfork also return in two processes. In particular, the
+		// vfork child shares the parent's stack until exec or _exit, so it
+		// must never run through the C++ dispatcher on that stack.
+		"cmp $57, %rax\n\t" // SYS_fork
+		"je syscall_addr\n\t"
+		"cmp $58, %rax\n\t" // SYS_vfork
+		"je handle_vfork\n\t"
+		// The dispatcher and its helpers may issue syscalls themselves. Sending
+		// those through the dispatcher again recursively corrupts its private
+		// stack, so keep nested syscalls on the raw path until this callback
+		// returns.
+		"movq bpftime_syscall_dispatch_active@gottpoff(%rip), %rcx\n\t"
+		"cmpl $0, %fs:(%rcx)\n\t"
+		"jne syscall_addr\n\t"
+		"movl $1, %fs:(%rcx)\n\t"
+		// Retain the application stack pointer for pt_regs and the final ret.
+		"movq %rsp, %r11\n\t"
+		"pushq %rbp\n\t" // application frame pointer
+		"pushq %r11\n\t" // application stack with return PC at top
 		"movq %rsp, %rbp\n\t"
 		"andq $-16, %rsp \n\t" // 16 byte stack alignment
 		"pushq %rax\n\t" // Save syscall args on stack
@@ -96,9 +117,35 @@ static syscall_hooker_func_t call_hook = &call_orig_syscall;
 		"movq 24(%rsp), %rcx\n\t" // arg3
 		"movq 16(%rsp), %r8\n\t" // arg4
 		"movq 8(%rsp), %r9\n\t" // arg5
-		"pushq (%rsp)\n\t" // arg6
+		// The OTel stack helper consumes a pt_regs-shaped context. Carry
+		// the application state at the replaced syscall through the C ABI:
+		// arg6, return PC, pre-hook SP, and the original frame pointer.
+		"subq $8, %rsp\n\t" // preserve 16-byte call-site alignment
+		"pushq 8(%rbp)\n\t" // user_bp (argument 10)
+		"movq 0(%rbp), %r11\n\t"
+		"leaq 8(%r11), %r11\n\t"
+		"pushq %r11\n\t" // user_sp (argument 9)
+		"movq 0(%rbp), %r11\n\t"
+		"pushq (%r11)\n\t" // user_ip (argument 8)
+		"pushq 32(%rsp)\n\t" // arg6 (argument 7)
 		"call syscall_hooker_cxx\n\t"
-		"leave\n\t"
+		"movq bpftime_syscall_dispatch_active@gottpoff(%rip), %rcx\n\t"
+		"movl $0, %fs:(%rcx)\n\t"
+		// A real syscall preserves the argument registers. The C++
+		// dispatcher is allowed to clobber them, so restore their values
+		// before returning to the application while retaining the syscall
+		// result in %rax.
+		"movq %rax, %r11\n\t"
+		"movq 80(%rsp), %rdi\n\t"
+		"movq 72(%rsp), %rsi\n\t"
+		"movq 64(%rsp), %rdx\n\t"
+		"movq 56(%rsp), %r10\n\t"
+		"movq 48(%rsp), %r8\n\t"
+		"movq 40(%rsp), %r9\n\t"
+		"movq %r11, %rax\n\t"
+		"movq 0(%rbp), %rcx\n\t"
+		"movq 8(%rbp), %rbp\n\t"
+		"movq %rcx, %rsp\n\t"
 		"ret\n\t");
 
 	__asm__(".globl call_orig_syscall\n\t"
@@ -110,11 +157,29 @@ static syscall_hooker_func_t call_hook = &call_orig_syscall;
 		"movq %r8, %r10 \n\t"
 		"movq %r9, %r8 \n\t"
 		"movq 8(%rsp),%r9 \n\t"
-		"handle_sigreturn:\n\t"
-		// "addq $8, %rsp\n\t"
 		"syscall_addr:\n\t"
 		"syscall\n\t"
 		"ret\n\t"
+		// Replacing rt_sigreturn's two-byte syscall with call *%rax adds
+		// one return address above the kernel signal frame. Remove it before
+		// asking the kernel to restore that frame. This syscall cannot return
+		// on success.
+		"handle_rt_sigreturn:\n\t"
+		"addq $8, %rsp\n\t"
+		"syscall\n\t"
+		"ud2\n\t"
+		// The vfork child shares the parent's stack. Remove the return slot
+		// added by the replacement call before entering the kernel, and keep
+		// the continuation in TLS so neither return path leaves a bpftime
+		// frame for the child to overwrite.
+		"handle_vfork:\n\t"
+		"movq (%rsp), %r11\n\t"
+		"movq bpftime_vfork_return_ip@gottpoff(%rip), %rcx\n\t"
+		"movq %r11, %fs:(%rcx)\n\t"
+		"addq $8, %rsp\n\t"
+		"syscall\n\t"
+		"movq bpftime_vfork_return_ip@gottpoff(%rip), %rcx\n\t"
+		"jmp *%fs:(%rcx)\n\t"
 		// Reached only by an explicit jump from the dispatcher, never
 		// by fall-through: call_orig_syscall above must continue
 		// straight into `syscall`. Registers are still in syscall ABI
@@ -125,24 +190,24 @@ static syscall_hooker_func_t call_hook = &call_orig_syscall;
 		"testq %rsi, %rsi\n\t" // no child stack: fork-like, the child
 					// keeps the parent's stack layout and
 					// the ordinary `ret` is already correct
-		"jz handle_sigreturn\n\t"
+		"jz syscall_addr\n\t"
 		"movq (%rsp), %r11\n\t" // application return address
 		"subq $8, %rsi\n\t"
 		"movq %r11, (%rsi)\n\t" // the child pops this in `ret`
-		"jmp handle_sigreturn\n\t"
+		"jmp syscall_addr\n\t"
 		"handle_clone3:\n\t"
 		"movq 40(%rdi), %rcx\n\t" // clone_args.stack
 		"testq %rcx, %rcx\n\t"
-		"jz handle_sigreturn\n\t"
+		"jz syscall_addr\n\t"
 		"cmpq $8, 48(%rdi)\n\t" // clone_args.stack_size
-		"jb handle_sigreturn\n\t"
+		"jb syscall_addr\n\t"
 		"addq 48(%rdi), %rcx\n\t" // top of the child stack
 		"movq (%rsp), %r11\n\t"
 		"subq $8, %rcx\n\t"
 		"movq %r11, (%rcx)\n\t"
 		"subq $8, 48(%rdi)\n\t" // the kernel starts the child one
 					 // slot lower, on the seeded address
-		"jmp handle_sigreturn\n\t");
+		"jmp syscall_addr\n\t");
 }
 #elif defined(__aarch64__)
 // TODO: implement syscall trace trampoline
@@ -155,8 +220,12 @@ static syscall_hooker_func_t call_hook = &call_orig_syscall;
 // undefined reference (issue #83, same cause as __asm_holder above).
 extern "C" __attribute__((used)) int64_t
 syscall_hooker_cxx(int64_t sys_nr, int64_t arg1, int64_t arg2, int64_t arg3,
-		   int64_t arg4, int64_t arg5, int64_t arg6)
+		   int64_t arg4, int64_t arg5, int64_t arg6, int64_t user_ip,
+		   int64_t user_sp, int64_t user_bp)
 {
+	(void)user_ip;
+	(void)user_sp;
+	(void)user_bp;
 	return call_hook(sys_nr, arg1, arg2, arg3, arg4, arg5, arg6);
 }
 
