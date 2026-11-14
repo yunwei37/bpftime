@@ -530,6 +530,33 @@ static bool ensure_detach_worker_started() noexcept
 
 syscall_hooker_func_t orig_hooker;
 
+// A multi-threaded process (the agent keeps IPC/refresh/handler worker threads)
+// that calls fork() leaves only the calling thread alive in the child, while
+// the child inherits stale interceptor state and the genuinely shared
+// /dev/shm mappings. Running BPF callbacks or touching the shared agent state
+// from that single-threaded child before it execve()s corrupts the child's
+// control flow and the parent's workers (observed as a garbage wait4 pid /
+// ECHILD followed by SIGSEGV when hot-path logging is compiled out). Until
+// execve replaces the image, make the child pass every syscall straight
+// through with no bpftime processing.
+static std::atomic<bool> bpftime_in_forked_child{ false };
+
+static void bpftime_atfork_child() noexcept
+{
+	bpftime_in_forked_child.store(true, std::memory_order_release);
+}
+
+static void bpftime_register_fork_guard() noexcept
+{
+	static const int registered = []() noexcept {
+		// prepare/parent handlers are unnecessary: only the child
+		// switches to inert mode.
+		return pthread_atfork(nullptr, nullptr,
+				      bpftime_atfork_child);
+	}();
+	(void)registered;
+}
+
 extern "C" void bpftime_agent_main(const gchar *data, gboolean *stay_resident);
 
 extern "C" int bpftime_hooked_main(int argc, char **argv, char **envp)
@@ -1184,6 +1211,14 @@ extern "C" int64_t syscall_callback(int64_t sys_nr, int64_t arg1, int64_t arg2,
 				    int64_t arg6)
 {
 	try {
+		// Inert forked child: bypass all BPF/SHM processing so the child
+		// can reach execve() cleanly without touching inherited state.
+		if (bpftime_in_forked_child.load(std::memory_order_acquire)) {
+			if (orig_hooker != nullptr)
+				return orig_hooker(sys_nr, arg1, arg2, arg3,
+						  arg4, arg5, arg6);
+			return -ENOSYS;
+		}
 		auto impl = bpftime::attach::global_syscall_trace_attach_impl;
 		if (impl.has_value() && impl.value() != nullptr) {
 			return impl.value()->dispatch_syscall(
@@ -1201,6 +1236,7 @@ _bpftime__setup_syscall_trace_callback(syscall_hooker_func_t *hooker)
 {
 	if (hooker == nullptr)
 		return;
+	bpftime_register_fork_guard();
 	orig_hooker = *hooker;
 	*hooker = &syscall_callback;
 	gboolean val = FALSE;

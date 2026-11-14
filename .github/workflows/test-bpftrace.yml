@@ -723,6 +723,16 @@ jobs:
           verbose: true
 
   build-and-run-one-liners-test:
+    name: build-and-run-one-liners-test (${{ matrix.log_level }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # TRACE keeps historical timing; INFO compiles DEBUG/TRACE call sites
+        # out of hot paths (the optimized-build default). The fork-child inert
+        # guard must hold under both: INFO timing deterministically exposed the
+        # pre-existing multi-threaded fork corruption (garbage wait4 pid/ECHILD
+        # followed by SIGSEGV).
+        log_level: [TRACE, INFO]
     runs-on: ubuntu-22.04
     container:
       image: "manjusakalza/bpftime-base-image:ubuntu-2204"
@@ -766,7 +776,8 @@ jobs:
             -DBUILD_BPFTIME_DAEMON=OFF \
             -DBUILD_AGENT=1 \
             -DBPFTIME_ENABLE_CUDA_ATTACH=OFF \
-            -DCMAKE_CXX_FLAGS="-DDEFAULT_LOGGER_OUTPUT_PATH='\"console\"'"
+            -DCMAKE_CXX_FLAGS="-DDEFAULT_LOGGER_OUTPUT_PATH='\"console\"'" \
+            -DSPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_${{ matrix.log_level }}
           cmake --build build --config RelWithDebInfo --target bpftime-agent bpftime-syscall-server bpftime_text_segment_transformer -j$(nproc)
 
           echo "Checking built libraries:"
@@ -960,7 +971,7 @@ jobs:
         if: success() || failure()
         uses: actions/upload-artifact@v4
         with:
-          name: oneliner-server-logs-${{ runner.os }}
+          name: oneliner-server-logs-${{ runner.os }}-${{ matrix.log_level }}
           include-hidden-files: false
           path: |
             ./logs
