@@ -36,6 +36,33 @@ thread_local bool tls_feasible_cached = false;
 thread_local stack_t tls_alt = {};
 thread_local bool tls_alt_owned = false;
 
+// fork() may happen while another thread is inside a copy window. The child
+// returns from fork() with no copy actually in flight, so its global depth is
+// zeroed and the per-thread feasibility cache invalidated (the child signal
+// mask is its own; a blocked SIGSEGV/SIGBUS cannot be seen via a stale parent
+// cache). The prepare/parent/child trio keeps the disposition mutex owned
+// consistently on both sides of the fork.
+void atfork_prepare()
+{
+	g_disp_mtx.lock();
+}
+
+void atfork_parent()
+{
+	g_disp_mtx.unlock();
+}
+
+void atfork_child()
+{
+	g_window_depth = 0;
+	tls_feasible_cached = false;
+	g_disp_mtx.unlock();
+}
+
+const int g_atfork_registration = []() {
+	return pthread_atfork(atfork_prepare, atfork_parent, atfork_child);
+}();
+
 // Exact membership of the two access instruction PCs. The fixed two-entry
 // set is expressed as named symbols rather than an address table so all
 // references are RIP-relative and the shared library needs no text
