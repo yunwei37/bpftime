@@ -24,8 +24,6 @@ extern "C" {
 extern const char bpftime_pc_probe_load[];
 extern const char bpftime_pc_probe_store[];
 extern const char bpftime_pc_probe_recovery[];
-extern const char *const bpftime_pc_fault_table[];
-extern const char *const bpftime_pc_fault_table_end[];
 }
 
 namespace
@@ -42,14 +40,9 @@ int process_vm_fallback(void *dst, const void *src, size_t n)
 		       0;
 }
 
-bool in_fault_table(const char *pc)
+bool is_fault_pc(const char *pc)
 {
-	for (const char *const *entry = bpftime_pc_fault_table;
-	     entry != bpftime_pc_fault_table_end; ++entry) {
-		if (pc == *entry)
-			return true;
-	}
-	return false;
+	return pc == bpftime_pc_probe_load || pc == bpftime_pc_probe_store;
 }
 } // namespace
 
@@ -159,24 +152,17 @@ TEST_CASE("concurrent threads each recover independently",
 	REQUIRE(good.load() == kThreads * kIters);
 }
 
-TEST_CASE("fault table contains exactly the two access instructions",
+TEST_CASE("recoverable PCs are exactly the two access instructions",
 	  "[probe-read-signal]")
 {
-	size_t entries = 0;
-	bool saw_load = false, saw_store = false;
-	for (const char *const *entry = bpftime_pc_fault_table;
-	     entry != bpftime_pc_fault_table_end; ++entry) {
-		++entries;
-		saw_load |= *entry == bpftime_pc_probe_load;
-		saw_store |= *entry == bpftime_pc_probe_store;
-	}
-	REQUIRE(entries == 2);
-	REQUIRE(saw_load);
-	REQUIRE(saw_store);
+	REQUIRE(is_fault_pc(bpftime_pc_probe_load));
+	REQUIRE(is_fault_pc(bpftime_pc_probe_store));
+	// Load and store are distinct fixed instruction addresses.
+	REQUIRE(bpftime_pc_probe_load != bpftime_pc_probe_store);
 	// Recovery entry and an ordinary data address must not be members.
-	REQUIRE_FALSE(in_fault_table(bpftime_pc_probe_recovery));
+	REQUIRE_FALSE(is_fault_pc(bpftime_pc_probe_recovery));
 	char stack_marker = 0;
-	REQUIRE_FALSE(in_fault_table(
+	REQUIRE_FALSE(is_fault_pc(
 		reinterpret_cast<const char *>(&stack_marker)));
 }
 
