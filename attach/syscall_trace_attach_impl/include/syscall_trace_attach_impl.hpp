@@ -49,10 +49,6 @@ struct syscall_trace_attach_entry {
 extern std::optional<class syscall_trace_attach_impl *>
 	global_syscall_trace_attach_impl;
 
-// DIAGNOSTIC: process-global (non-thread-local) depth, to test whether
-// thread_local itself is the crash trigger under the dlmopen link namespace.
-inline int syscall_dispatch_depth = 0;
-
 // Used by text segment transformer to setup syscall callback
 // Text segment transformer should provide a pointer to its syscall executor
 // function. syscall trace attach impl will save the original syscall function,
