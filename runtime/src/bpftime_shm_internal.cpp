@@ -1179,6 +1179,13 @@ const struct runtime_config &bpftime_shm::get_runtime_config()
 {
 	if (runtime_config == nullptr) {
 		SPDLOG_DEBUG("use current process config");
+		// A previous global-shm reinitialization (placement-new in
+		// bpftime_initialize_global_shm) resets this optional without
+		// running set_runtime_config again. Lazily build the default
+		// config so callers never dereference an empty optional; this
+		// removes the implicit dependency on test setup ordering.
+		if (!local_runtime_config.has_value())
+			local_runtime_config.emplace(construct_runtime_config_from_env());
 		return *local_runtime_config;
 	}
 	return *runtime_config;
