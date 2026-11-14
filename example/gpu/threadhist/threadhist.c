@@ -102,9 +102,14 @@ int main(int argc, char **argv)
 		err = -1;
 		goto cleanup;
 	}
-	while (!exiting)
+	/* Print the histogram periodically (README contract: the userspace
+	 * program reads counters and displays them while running). Keeping the
+	 * in-loop print matters under a SIGKILL-based timeout, where a
+	 * post-loop print would never execute and produce no "Thread" output. */
+	while (!exiting) {
 		sleep(1);
-	print_stat(skel, thread_count);
+		print_stat(skel, thread_count);
+	}
 cleanup:
 	/* Clean up */
 	threadhist_bpf__destroy(skel);
