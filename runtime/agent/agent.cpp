@@ -544,6 +544,10 @@ static std::atomic<bool> bpftime_in_forked_child{ false };
 static void bpftime_atfork_child() noexcept
 {
 	bpftime_in_forked_child.store(true, std::memory_order_release);
+	// TEMP VERIFICATION (diag only): prove the child handler fires under the
+	// real dlmopen(LM_ID_NEWLM) transformer loading.
+	const char m[] = "FORKGUARD_CHILD_HANDLER_FIRED\n";
+	(void)!write(STDERR_FILENO, m, sizeof(m) - 1);
 }
 
 static void bpftime_register_fork_guard() noexcept
