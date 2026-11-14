@@ -206,6 +206,7 @@ static inline void rewrite_segment(uint8_t *code, size_t len, int perm)
 struct MapEntry {
 	uint64_t begin, end;
 	char w, r, x;
+	std::string path;
 	int get_perm() const
 	{
 		int ret = 0;
@@ -307,17 +308,58 @@ void setup_syscall_tracer()
 			if (buf == "[stack]" || buf == "[vsyscall]") {
 				continue;
 			}
+			curr.path = std::move(buf);
 		}
 
 		entries.push_back(curr);
 	}
 	SPDLOG_INFO("Rewriting executable segments..");
+	// Resolve on-disk identities of the agent and this transformer so their
+	// own executable segments are never rewritten: their internal syscalls
+	// (futex/tgkill/clone in frida and the worker threads) must stay raw,
+	// otherwise they re-enter this hook inside the interceptor and corrupt
+	// the dispatcher frame in a forked child with stale interceptor state.
+	std::string agent_path;
+	if (const char *agent_so = getenv("AGENT_SO"); agent_so != nullptr) {
+		if (char *r = realpath(agent_so, nullptr); r != nullptr) {
+			agent_path = r;
+			free(r);
+		} else
+			agent_path = agent_so;
+	}
+	std::string transformer_path;
+	Dl_info tinfo = {};
+	if (dladdr((void *)&setup_syscall_tracer, &tinfo) != 0 &&
+	    tinfo.dli_fname != nullptr) {
+		if (char *r = realpath(tinfo.dli_fname, nullptr); r != nullptr) {
+			transformer_path = r;
+			free(r);
+		} else
+			transformer_path = tinfo.dli_fname;
+	}
 	// Hack the executable mappings
 	for (const auto &map : entries) {
 		if (map.x == 'x') {
 			if (map.begin == 0) {
 				// Skip pages that we mapped
 				continue;
+			}
+			if (!map.path.empty()) {
+				std::string resolved_map = map.path;
+				if (char *r = realpath(map.path.c_str(), nullptr);
+				    r != nullptr) {
+					resolved_map = r;
+					free(r);
+				}
+				if ((!agent_path.empty() &&
+				     resolved_map == agent_path) ||
+				    (!transformer_path.empty() &&
+				     resolved_map == transformer_path)) {
+					SPDLOG_DEBUG(
+						"Skipping bpftime self segment {:x}-{:x} {}",
+						map.begin, map.end, resolved_map);
+					continue;
+				}
 			}
 			SPDLOG_DEBUG("Rewriting segment from {:x} to {:x}",
 				      map.begin, map.end);
