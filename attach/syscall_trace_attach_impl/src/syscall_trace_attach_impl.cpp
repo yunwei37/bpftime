@@ -42,10 +42,13 @@ int64_t syscall_trace_attach_impl::dispatch_syscall(int64_t sys_nr,
 		return orig_syscall(sys_nr, arg1, arg2, arg3, arg4, arg5, arg6);
 #endif
 	dispatch_depth_guard depth_guard;
-	// DIAGNOSTIC: track depth but do NOT skip nested dispatch, isolating
-	// whether the crash comes from the TLS variable itself or the
-	// skip-callback control flow.
-	(void)depth_guard.nested;
+	if (depth_guard.nested) {
+		// Nested dispatch (bpf()/map/helper syscalls issued from inside a
+		// running callback) runs only the original syscall; re-running the
+		// callbacks would recurse into half-initialized attach state.
+		return orig_syscall(sys_nr, arg1, arg2, arg3, arg4, arg5,
+				    arg6);
+	}
 	SPDLOG_DEBUG("Syscall callback {} {} {} {} {} {} {}", sys_nr, arg1,
 		     arg2, arg3, arg4, arg5, arg6);
 	// Indicate whether the return value is overridden
