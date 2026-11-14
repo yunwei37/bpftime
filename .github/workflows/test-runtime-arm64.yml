@@ -3,7 +3,7 @@ name: Build and test runtime on arm64
 on:
   workflow_dispatch:
   push:
-    branches: ["master"]
+    branches: ["master", "tmp/arm64-verify-**"]
     paths: &runtime_paths
       - ".github/workflows/test-runtime-arm64.yml"
       - "attach/**"
@@ -77,3 +77,60 @@ jobs:
             "~[#test_attach_uprobe_with_ebpf_trap]" \
             "~[#test_shm_progs_attach]" \
             "~[#test_user_to_kernel_tailcall]"
+
+  runtime-arm64-diagnose:
+    # TEMPORARY diagnostic job on tmp/arm64-verify-** only: capture the
+    # sandbox environment, the kernel-BPF denial errno and a gdb backtrace of
+    # the frida uprobe SIGSEGV. This job is deleted with the temporary branch
+    # and is never merged to master.
+    runs-on: [self-hosted, linux, arm64, sandbox]
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install build dependencies and gdb
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            build-essential cmake ninja-build pkg-config git python3 gdb \
+            llvm-18-dev clang-18 libelf-dev zlib1g-dev libzstd-dev \
+            libboost-all-dev libssl-dev
+      - name: Enlarge /dev/shm
+        run: |
+          if [ "$(df -k --output=size /dev/shm | tail -1)" -lt 1048576 ]; then
+            sudo mount -o remount,size=1G /dev/shm
+          fi
+          df -h /dev/shm
+      - name: Build runtime tests
+        run: |
+          cmake -G Ninja -B build \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DBPFTIME_LLVM_JIT=YES -DBPFTIME_ENABLE_UNIT_TESTING=YES \
+            -DBPFTIME_ENABLE_CUDA_ATTACH=OFF -DBUILD_BPFTIME_DAEMON=OFF \
+            -DLLVM_DIR="$(llvm-config-18 --cmakedir)"
+          cmake --build build --target bpftime_runtime_tests -j2
+      - name: Record sandbox and kernel-BPF environment
+        run: |
+          uname -a
+          grep -E "Seccomp|NoNewPrivs" /proc/self/status
+          if [ -r /proc/sys/kernel/unprivileged_bpf_disabled ]; then
+            cat /proc/sys/kernel/unprivileged_bpf_disabled
+          else
+            echo "unprivileged_bpf_disabled sysctl absent"
+          fi
+      - name: Reproduce kernel-BPF tailcall denial
+        run: |
+          ./build/runtime/unit-test/bpftime_runtime_tests \
+            "[#test_user_to_kernel_tailcall]"; echo "tailcall exit code=$?"
+      - name: Capture frida uprobe SIGSEGV backtrace
+        run: |
+          gdb -batch \
+            -ex "set pagination off" \
+            -ex "handle SIG32 nostop noprint pass" \
+            -ex "run" \
+            -ex "bt" \
+            -ex "info registers" \
+            -ex "x/6i \$pc-12" \
+            --args ./build/runtime/unit-test/bpftime_runtime_tests \
+            "[#test_attach_uprobe_with_ebpf]"
