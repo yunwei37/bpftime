@@ -286,13 +286,21 @@ static void start_go_seccomp_workers()
 					// dispatch_seccomp_syscall allocates; an escaping
 					// exception would terminate the host. Exit this worker
 					// cleanly instead; the remaining workers keep serving.
-					SPDLOG_ERROR(
-						"seccomp worker exiting after exception: {}",
-						ex.what());
+					// The diagnostic is best-effort because spdlog can
+					// itself throw under the same memory pressure.
+					try {
+						SPDLOG_ERROR(
+							"seccomp worker exiting after exception: {}",
+							ex.what());
+					} catch (...) {
+					}
 					return;
 				} catch (...) {
-					SPDLOG_ERROR(
-						"seccomp worker exiting after unknown exception");
+					try {
+						SPDLOG_ERROR(
+							"seccomp worker exiting after unknown exception");
+					} catch (...) {
+					}
 					return;
 				}
 			}
