@@ -7,7 +7,6 @@
 
 #ifdef __linux__
 #include <asm/unistd.h>  // For architecture-specific syscall numbers
-#include <pthread.h>  // pthread_atfork
 #endif
 
 namespace bpftime
@@ -35,13 +34,6 @@ __attribute__((tls_model("initial-exec")))
 #endif
 static thread_local int syscall_dispatch_depth = 0;
 
-#ifdef __linux__
-// A fork() that happens while a callback is dispatching would make the child
-// inherit a non-zero depth even though the parent dispatch frame never returns
-// there, which would silence all tracing in the child. Reset it after fork.
-static const int syscall_dispatch_atfork_status =
-	pthread_atfork(nullptr, nullptr, [] { syscall_dispatch_depth = 0; });
-#endif
 
 struct dispatch_depth_guard {
 	bool nested;

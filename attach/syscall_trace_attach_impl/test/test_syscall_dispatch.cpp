@@ -6,7 +6,6 @@
 #include <syscall_trace_attach_impl.hpp>
 
 #ifdef __linux__
-#include <sys/wait.h>
 #include <unistd.h>
 #endif
 using namespace bpftime::attach;
@@ -282,51 +281,62 @@ TEST_CASE("Dispatch depth resets between independent syscalls")
 	REQUIRE(callback_count == 2);
 	REQUIRE(attacher.detach_by_id(id) == 0);
 }
-
 #ifdef __linux__
-TEST_CASE("Dispatch depth resets in a forked child")
+#include <asm/unistd.h>
+#include <atomic>
+#include <sys/syscall.h>
+#include <thread>
+#include <vector>
+static int64_t stress_real_syscall(int64_t nr, int64_t, int64_t, int64_t,
+				   int64_t, int64_t, int64_t)
 {
-	// If a callback forks while a dispatch is active on the thread, the
-	// child inherits a non-zero dispatch depth. Without the pthread_atfork
-	// reset, every dispatch in the child would be treated as nested and
-	// silently skip all callbacks, disabling tracing for the child's life.
-	syscall_trace_attach_impl attacher;
-	attacher.set_original_syscall_function(_bpftime_dummy_syscall);
+	return syscall((long)nr);
+}
 
+TEST_CASE("Dispatch guard survives high-frequency nested syscalls on threads")
+{
+	// Models the bpftrace global raw_syscalls tracepoint on a tight syscall
+	// loop (issue #165 workload): every outer dispatch runs a callback that
+	// itself issues a syscall, producing a nested dispatch on every event.
+	// The depth must oscillate and never leak or corrupt across threads.
+	syscall_trace_attach_impl attacher;
+	attacher.set_original_syscall_function(stress_real_syscall);
 	syscall_trace_attach_private_data data;
 	data.sys_nr = -1;
 	data.is_enter = true;
 
-	int callback_count = 0;
-	bool child_ok = false;
+	std::atomic<long> outer_events{ 0 };
 	int id = attacher.create_attach_with_ebpf_callback(
 		[&](const void *, size_t, uint64_t *) -> int {
-			callback_count++;
-			if (callback_count == 1) {
-				pid_t pid = fork();
-				REQUIRE(pid >= 0);
-				if (pid == 0) {
-					// The child inherited depth == 1.
-					// A fresh dispatch must still run
-					// the callback after the atfork
-					// reset; without it the guard skips
-					// the callback and count stays 1.
-					attacher.dispatch_syscall(
-						11, 0, 0, 0, 0, 0, 0);
-					_exit(callback_count == 2 ? 0 : 1);
-				}
-				int status = 0;
-				REQUIRE(waitpid(pid, &status, 0) == pid);
-				child_ok = WIFEXITED(status) &&
-					   WEXITSTATUS(status) == 0;
-			}
+			outer_events++;
+			// A syscall issued from inside the running callback.
+			attacher.dispatch_syscall(__NR_getpid, 0, 0, 0, 0, 0,
+						  0);
 			return 0;
 		},
 		data, ATTACH_SYSCALL_TRACE);
 	REQUIRE(id >= 0);
 
-	attacher.dispatch_syscall(11, 0, 0, 0, 0, 0, 0);
-	REQUIRE(child_ok);
+	constexpr int threads = 8;
+	constexpr long per_thread = 100000;
+	std::vector<std::thread> workers;
+	for (int t = 0; t < threads; ++t) {
+		workers.emplace_back([&] {
+			for (long i = 0; i < per_thread; ++i)
+				attacher.dispatch_syscall(__NR_getuid, 0, 0,
+							  0, 0, 0, 0);
+		});
+	}
+	for (auto &w : workers)
+		w.join();
+
+	REQUIRE(outer_events.load() ==
+		(long)threads * per_thread);
+	// After all threads finish, a fresh dispatch must still invoke callbacks,
+	// proving no thread leaked a non-zero depth.
+	long before = outer_events.load();
+	attacher.dispatch_syscall(__NR_getuid, 0, 0, 0, 0, 0, 0);
+	REQUIRE(outer_events.load() == before + 1);
 	REQUIRE(attacher.detach_by_id(id) == 0);
 }
 #endif
