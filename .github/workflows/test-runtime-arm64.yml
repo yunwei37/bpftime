@@ -119,18 +119,44 @@ jobs:
           else
             echo "unprivileged_bpf_disabled sysctl absent"
           fi
-      - name: Reproduce kernel-BPF tailcall denial
+      - name: Reproduce kernel-BPF tailcall denial and frida SIGSEGV
+        # Diagnostic-only step on a temporary branch: both failures are
+        # expected in this sandbox; the step fails only when their evidence is
+        # missing, never to mask a gating failure (the strict runtime-arm64
+        # job stays the real gate).
         run: |
-          ./build/runtime/unit-test/bpftime_runtime_tests \
-            "[#test_user_to_kernel_tailcall]"; echo "tailcall exit code=$?"
-      - name: Capture frida uprobe SIGSEGV backtrace
-        run: |
+          set +e
+          TEST_BIN=./build/runtime/unit-test/bpftime_runtime_tests
+
+          # 1. Kernel BPF: use the exact test name (the [#file] tag needs -#).
+          "$TEST_BIN" "Test tail calling from userspace to kernel" \
+            > tailcall.log 2>&1
+          tc_rc=$?
+          cat tailcall.log
+          echo "tailcall exit code=$tc_rc"
+
+          # 2. Frida arm64 code patching: let gdb stop on the fatal SIGSEGV.
+          #    Pass SIGTRAP through (frida's own trap flow); do not pass the
+          #    fatal SIGSEGV so gdb retains control for the backtrace.
           gdb -batch \
             -ex "set pagination off" \
-            -ex "handle SIG32 nostop noprint pass" \
+            -ex "handle SIGTRAP nostop noprint pass" \
+            -ex "handle SIGSEGV stop print nopass" \
             -ex "run" \
             -ex "bt" \
             -ex "info registers" \
-            -ex "x/6i \$pc-12" \
-            --args ./build/runtime/unit-test/bpftime_runtime_tests \
-            "[#test_attach_uprobe_with_ebpf]"
+            -ex "x/8i \$pc-16" \
+            --args "$TEST_BIN" \
+            "Test probing internal functions" > gdb.log 2>&1
+          gdb_rc=$?
+          cat gdb.log
+          echo "gdb exit code=$gdb_rc"
+
+          # Evidence assertions: the job fails unless BOTH sandbox signatures
+          # are actually observed.
+          grep -q "Map create err = 1" tailcall.log
+          tc_evidence=$?
+          grep -q "SIGSEGV" gdb.log
+          segv_evidence=$?
+          echo "tailcall evidence=$tc_evidence segv evidence=$segv_evidence"
+          test "$tc_evidence" -eq 0 -a "$segv_evidence" -eq 0
