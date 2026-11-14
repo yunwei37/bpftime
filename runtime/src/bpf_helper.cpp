@@ -22,6 +22,7 @@
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #endif
+#include "signal_probe.hpp"
 #ifdef BPFTIME_BUILD_WITH_LIBBPF
 #include "bpf/bpf.h"
 #include "bpf/libbpf_common.h"
@@ -125,6 +126,22 @@ int64_t bpftime_probe_read(uint64_t dst, int64_t size, uint64_t ptr, uint64_t,
 		SPDLOG_ERROR("Invalid size: {}", size);
 		return -EFAULT;
 	}
+#if BPFTIME_HAVE_SIGNAL_PROBE_BACKEND
+	// Scoped signal-recovery backend: the SIGSEGV/SIGBUS disposition is
+	// installed only for the copy and restored before returning. A
+	// recovered synchronous access fault maps to -EFAULT; the destination
+	// may be partially written on failure. If the backend is unavailable
+	// in this thread (blocked fault signals, no signal stack), fall
+	// through to process_vm_readv when compiled in; refuse otherwise
+	// instead of risking an unprotected memcpy.
+	int signal_rc = bpftime::signal_probe::protected_copy(
+		(void *)dst, (void *)ptr, (size_t)size);
+	if (signal_rc >= 0)
+		return signal_rc == 1 ? 0 : -EFAULT;
+#ifndef ENABLE_PROBE_READ_CHECK
+	return -EFAULT;
+#endif
+#endif
 #ifdef ENABLE_PROBE_READ_CHECK
 	return probe_read_memory((void *)dst, (void *)ptr, (size_t)size) ?
 		       0 :
