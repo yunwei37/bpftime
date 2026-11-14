@@ -120,8 +120,14 @@ int bpf_attach_ctx::init_attach_ctx_from_handlers(
 		}
 		SPDLOG_DEBUG(
 			"Main initializing for handlers done; initializing CUDA link handles");
+#ifdef BPFTIME_ENABLE_CUDA_ATTACH
 		/// Initialize nvda links at the last time, because they require
-		/// map_basic_info
+		/// map_basic_info. The nv_attach_impl that consumes this scan is
+		/// only registered when BPFTIME_ENABLE_CUDA_ATTACH is defined; in a
+		/// non-CUDA build every effect below is either identical to the
+		/// first pass or short-circuited by the instantiated_* caches, so
+		/// the re-entrant scan has no purpose and only re-enters handlers
+		/// (it is the crash site for non-CUDA tracepoint examples).
 		for (int i = 0; i < (int)manager->size(); i++) {
 			if (manager->is_allocated(i)) {
 				std::set<int> stk;
@@ -134,6 +140,7 @@ int bpf_attach_ctx::init_attach_ctx_from_handlers(
 				}
 			}
 		}
+#endif
 		const std::uint64_t epoch_after =
 			shm_holder.global_shared_memory.read_stable_epoch_seq();
 		if (epoch_after == BPFTIME_EPOCH_SEQ_MISSING) {
