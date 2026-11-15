@@ -333,8 +333,10 @@ int bpftime_prog::bpftime_prog_exec(void *memory, size_t memory_size,
 	}
 	uint64_t val = 0;
 	int res = 0;
-	// set share memory read and write able
-	bpftime_protect_disable();
+	// Open the shared-memory write window for the program, and give the
+	// caller's rights back on return, so a runtime call that runs a program
+	// keeps its own window open.
+	int saved_protect = bpftime_protect_open_write_window();
 	SPDLOG_DEBUG(
 		"Calling bpftime_prog::bpftime_prog_exec, memory={:x}, memory_size={}, return_val={:x}, prog_name={}",
 		(uintptr_t)memory, memory_size, (uintptr_t)return_val,
@@ -352,8 +354,7 @@ int bpftime_prog::bpftime_prog_exec(void *memory, size_t memory_size,
 	}
 	*return_val = current_thread_tail_call_ret.value_or(val);
 	current_thread_tail_call_ret.reset();
-	// set share memory read only
-	bpftime_protect_enable();
+	bpftime_protect_restore(saved_protect);
 	return res;
 }
 
