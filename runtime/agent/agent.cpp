@@ -445,6 +445,7 @@ static int perform_detach()
 	// teardown while kernels are still running).
 	ctx_holder.ctx.reset_instantiated_state();
 	if (detach_err >= 0) {
+		shm_write_window_guard shm_window;
 		shm_holder.global_shared_memory.remove_pid_from_alive_agent_set(
 			getpid());
 	}
@@ -723,6 +724,7 @@ static int refresh_attach_session(const gchar *data)
 			res);
 		return res < 0 ? res : -EINVAL;
 	}
+	shm_write_window_guard shm_window;
 	if (!shm_holder.global_shared_memory.add_pid_into_alive_agent_set(
 		    getpid())) {
 		SPDLOG_ERROR("agent_control: unable to record alive agent pid");
@@ -887,6 +889,7 @@ static void bpftime_agent_main_impl(const gchar *data,
 		global_ctx_constructed.store(false, std::memory_order_release);
 		if (recorded_alive_pid) {
 			try {
+				shm_write_window_guard shm_window;
 				shm_holder.global_shared_memory
 					.remove_pid_from_alive_agent_set(
 						getpid());
@@ -1160,6 +1163,7 @@ static void bpftime_agent_main_impl(const gchar *data,
 				std::atexit(stop_auto_refresh_at_exit);
 			}
 
+			shm_write_window_guard shm_window;
 			if (!shm_holder.global_shared_memory
 				     .add_pid_into_alive_agent_set(getpid())) {
 				SPDLOG_ERROR("Unable to record alive agent pid");
