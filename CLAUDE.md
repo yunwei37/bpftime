@@ -157,8 +157,10 @@ the tracking entry and the regression coverage in the same pull request.
    `terminate`, or otherwise end the host because of an internal error.
    Return or record the error and disable only the affected bpftime
    operation. No C++ exception may cross an exported C or interposition
-   boundary; catch at the boundary and fail open. Tracked residual sites are
-   collected under issue #605.
+   boundary; catch at the boundary and fail open. The text-segment
+   transformer's `exit(1)` sites were removed in #761, which now returns the
+   failure and leaves the untransformed segment running; tracked residual
+   sites elsewhere are collected under issue #605.
 2. **Fail open to the host operation.** When an interposed call, shim, or
    attach cannot be serviced, fall back to the original libc/syscall
    behavior (or skip the affected probe) instead of failing the host call.
@@ -167,7 +169,11 @@ the tracking entry and the regression coverage in the same pull request.
    explicitly selected console output (`BPFTIME_LOG_OUTPUT=console`). Route
    diagnostics and `bpf_trace_printk` through the configured bpftime sink;
    a sink setup failure falls back to a silent sink. A residual
-   initialization-logging path is tracked under issue #692.
+   initialization-logging path is tracked under issue #692. When stdout is
+   redirected and the process is ended by an uncatchable `SIGKILL` timeout,
+   fully-buffered output printed only after the run loop is lost; emit the
+   program's own required contract output inside the loop and flush it (the
+   loop-printing fix landed in #799).
 4. **Preserve host signal disposition.** Never replace a host signal handler
    without chaining to it or restoring the previous disposition. Trap/SIGTRAP
    handlers forward signals that do not originate from our breakpoints.
@@ -189,7 +195,8 @@ the tracking entry and the regression coverage in the same pull request.
 7. **Admission of untrusted programs.** eBPF programs are externally
    supplied code. Where a verifier or helper whitelist exists, programs
    that fail it are rejected at load/link time; a rejected helper is never
-   replaced with a silent no-op. JIT compilation required for
+   replaced with a silent no-op (load-time rejection of unregistered helper
+   calls is implemented in #705). JIT compilation required for
    signal-context execution finishes before a probe is armed. The verifier
    is currently opt-in (`ENABLE_EBPF_VERIFIER`, default OFF) and
    kprobe-shaped sections are not yet verified; this gap is tracked in

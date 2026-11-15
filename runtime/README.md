@@ -257,6 +257,23 @@ under review. Both must satisfy the semantics below before becoming selectable.
   frame-pointer addresses, including stale frames left by coroutine stack
   switches. Safety must come from the copy backend.
 
+### Build-time sanitizer precondition
+
+A safe probe backend cannot save a host that crashes inside an injected
+sanitizer before any helper runs. Two build-time requirements are therefore
+independent of the backend selected above (addressed in #820):
+
+- Preload `libasan` only when the build carries a matching GCC-libasan
+  `NEEDED` entry. An unconditional `LD_PRELOAD` of an unmatched sanitizer
+  crashes even an empty program with an AddressSanitizer `SIGSEGV`.
+- Keep the LLVM package's compile definitions. Without them the
+  `llvm::Function` layout assumed by the build does not match the installed
+  library, which corrupts the heap during JIT setup.
+
+These are build/CI preconditions, not probe-backend choices: selecting a
+no-fault copy backend does not substitute for a matching sanitizer and
+toolchain configuration.
+
 ### Test surface
 
 - `runtime/unit-test/test_probe.cpp`: valid, unmapped, and stale pointers;
