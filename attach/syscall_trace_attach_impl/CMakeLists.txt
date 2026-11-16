@@ -18,7 +18,10 @@ add_library(
 add_dependencies(bpftime_syscall_trace_attach_impl bpftime_base_attach_impl spdlog::spdlog bpftime_syscall_trace_syscall_id_table)
 set(SYSCALL_TRACE_ATTACH_IMPL_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/include CACHE STRING "Include path of syscall trace impl")
 
-target_include_directories(bpftime_syscall_trace_attach_impl PRIVATE ${SPDLOG_INCLUDE} ${CMAKE_CURRENT_BINARY_DIR} PUBLIC ${BASE_ATTACH_IMPL_INCLUDE} ${SYSCALL_TRACE_ATTACH_IMPL_INCLUDE})
+# Allowed downward dependency: this attach module consumes the neutral
+# rootless tracepoint-id contract that lives in runtime/include. It must not
+# include any runtime/ implementation or other attach component.
+target_include_directories(bpftime_syscall_trace_attach_impl PRIVATE ${SPDLOG_INCLUDE} ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../../runtime/include PUBLIC ${BASE_ATTACH_IMPL_INCLUDE} ${SYSCALL_TRACE_ATTACH_IMPL_INCLUDE})
 
 target_link_libraries(bpftime_syscall_trace_attach_impl PUBLIC bpftime_base_attach_impl spdlog::spdlog)
 

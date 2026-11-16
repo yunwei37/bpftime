@@ -4,6 +4,7 @@
  * All rights reserved.
  */
 #include "syscall_context.hpp"
+#include "syscall_server_internal_dispatch.hpp"
 #if defined(__x86_64__)
 #include <asm/unistd_64.h>
 #else
@@ -465,8 +466,8 @@ extern "C" FILE *_IO_new_fopen(const char *pathname, const char *flags)
 		call_original, safe_ptr_str(pathname), safe_ptr_str(flags));
 }
 #if __linux__
-static long dispatch_syscall(long sysno, long arg1, long arg2, long arg3,
-			     long arg4, long arg5, long arg6)
+long dispatch_syscall(long sysno, long arg1, long arg2, long arg3,
+		      long arg4, long arg5, long arg6) noexcept
 {
 	if (sysno == __NR_openat) {
 		const auto *file = reinterpret_cast<const char *>(arg2);

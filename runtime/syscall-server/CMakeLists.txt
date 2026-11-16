@@ -4,10 +4,17 @@ project(
     LANGUAGES C CXX
 )
 
+# Rootless capture is built into this existing shared object. No new library
+# is created and nothing under attach/ is linked: seccomp_notifier and the
+# rootless __libc_start_main entry are frida/capstone-free and call only the
+# local dispatch_syscall. See rootless_agent_entry.cpp / runtime/README.md.
 add_library(bpftime-syscall-server SHARED
     syscall_context.cpp
     syscall_server_main.cpp
     syscall_server_utils.cpp
+    seccomp_notifier.cpp
+    seccomp_raw_syscall.cpp
+    rootless_agent_entry.cpp
 )
 
 # Force link VM compat libraries so constructor-based factory registration is retained
@@ -47,6 +54,7 @@ add_dependencies(bpftime-syscall-server spdlog::spdlog)
 target_include_directories(bpftime-syscall-server
     PUBLIC
     "../include"
+    ${CMAKE_CURRENT_SOURCE_DIR}
     "../../vm"
     "../../third_party/libbpf/include/uapi"
     ${SPDLOG_INCLUDE}

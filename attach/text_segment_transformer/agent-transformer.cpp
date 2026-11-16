@@ -22,32 +22,11 @@
 #include <mutex>
 #include <optional>
 #include "text_segment_transformer.hpp"
-#if defined(__linux__) && defined(__x86_64__)
-#include "seccomp_tracer.hpp"
-#endif
+
 #include <string>
 #include <thread>
 
-#if defined(__linux__) && defined(__x86_64__)
-#ifndef SECCOMP_RET_USER_NOTIF
-#define SECCOMP_RET_USER_NOTIF 0x7fc00000U
-#define SECCOMP_FILTER_FLAG_NEW_LISTENER (1UL << 3)
-struct seccomp_notif {
-	uint64_t id;
-	uint32_t pid;
-	uint32_t flags;
-	struct seccomp_data data;
-};
-struct seccomp_notif_resp {
-	uint64_t id;
-	int64_t val;
-	int32_t error;
-	uint32_t flags;
-};
-#define SECCOMP_IOCTL_NOTIF_RECV _IOWR('!', 0, struct seccomp_notif)
-#define SECCOMP_IOCTL_NOTIF_SEND _IOWR('!', 1, struct seccomp_notif_resp)
-#endif
-#endif
+
 
 using main_func_t = int (*)(int, char **, char **);
 using shm_destroy_func_t = void (*)(void);
@@ -155,17 +134,9 @@ extern "C" void bpftime_agent_main(const gchar *data, gboolean *stay_resident)
 			"Malformed agent so: no syscall callback entry point");
 		return;
 	}
-#if defined(__linux__) && defined(__x86_64__)
-	if (getenv("BPFTIME_GO_SECCOMP") != nullptr) {
-		if (!bpftime::seccomp::install_seccomp_tracer()) {
-			SPDLOG_CRITICAL(
-				"Unable to install requested rootless seccomp syscall tracer");
-			return;
-		}
-	} else
-#endif
-	{
-		bpftime::setup_syscall_tracer();
-	}
+	// This transformer serves the in-process uprobe text-segment path only.
+	// Rootless seccomp capture is owned by bpftime-syscall-server now; do not
+	// install it here (loading frida/capstone on that path was the hang).
+	bpftime::setup_syscall_tracer();
 	SPDLOG_DEBUG("Transformer exiting, syscall trace is usable now");
 }
