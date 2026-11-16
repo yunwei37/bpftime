@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <ebpf-vm.h>
 #include "syscall_context.hpp"
+#include "system_analysis_compat.hpp"
 #include "handler/map_handler.hpp"
 #include <cstring>
 #include <fcntl.h>
@@ -243,89 +244,6 @@ void syscall_context::load_config_from_env()
 	}
 }
 
-namespace {
-struct system_analysis_compat_value {
-	uint64_t address;
-	uint32_t pid;
-	int32_t error;
-	uint8_t code[128];
-};
-
-void maybe_complete_system_analysis(int map_fd, void *value)
-{
-	const char *offset_text =
-		getenv("BPFTIME_SYSTEM_ANALYSIS_PTREGS_OFFSET");
-#if defined(__x86_64__)
-	const char *tpbase_address_text =
-		getenv("BPFTIME_SYSTEM_ANALYSIS_TPBASE_ADDRESS");
-	const char *tpbase_offset_text =
-		getenv("BPFTIME_SYSTEM_ANALYSIS_TPBASE_OFFSET");
-#else
-	const char *tpbase_address_text = nullptr;
-	const char *tpbase_offset_text = nullptr;
-#endif
-	if (offset_text == nullptr &&
-	    (tpbase_address_text == nullptr || tpbase_offset_text == nullptr))
-		return;
-	bpftime::bpf_map_attr map_attr;
-	const char *map_name = nullptr;
-	bpftime::bpf_map_type map_type;
-	int saved_errno = errno;
-	if (bpftime_map_get_info(map_fd, &map_attr, &map_name, &map_type) < 0 ||
-	    map_name == nullptr || strcmp(map_name, "system_analysis") != 0 ||
-	    map_attr.value_size < sizeof(system_analysis_compat_value)) {
-		errno = saved_errno;
-		return;
-	}
-	auto *analysis = static_cast<system_analysis_compat_value *>(value);
-#if defined(__x86_64__)
-	if (tpbase_address_text != nullptr && tpbase_offset_text != nullptr) {
-		char *address_end = nullptr;
-		char *offset_end = nullptr;
-		errno = 0;
-		unsigned long long address =
-			strtoull(tpbase_address_text, &address_end, 0);
-		unsigned long offset =
-			strtoul(tpbase_offset_text, &offset_end, 0);
-		if (errno == 0 && address_end != tpbase_address_text &&
-		    *address_end == '\0' && offset_end != tpbase_offset_text &&
-		    *offset_end == '\0' && offset <= UINT32_MAX &&
-		    analysis->pid != 0 && analysis->address == address) {
-			memset(analysis->code, 0, sizeof(analysis->code));
-			analysis->code[0] = 0x48;
-			analysis->code[1] = 0x89;
-			analysis->code[2] = 0xb7;
-			uint32_t encoded_offset = (uint32_t)offset;
-			memcpy(&analysis->code[3], &encoded_offset,
-			       sizeof(encoded_offset));
-			analysis->address = 0;
-			analysis->error = 0;
-			analysis->pid = 0;
-			errno = saved_errno;
-			return;
-		}
-	}
-#endif
-	if (offset_text == nullptr)
-		return;
-	char *end = nullptr;
-	errno = 0;
-	unsigned long offset = strtoul(offset_text, &end, 0);
-	if (errno != 0 || end == offset_text || *end != '\0' ||
-	    offset > UINT32_MAX)
-		return;
-	if (analysis->pid == 0 || analysis->address >= 4096) {
-		errno = saved_errno;
-		return;
-	}
-	constexpr uint64_t stack_base = 1ULL << 20;
-	memcpy(analysis->code, &stack_base, sizeof(stack_base));
-	analysis->address = stack_base + offset;
-	analysis->error = 0;
-	analysis->pid = 0;
-	errno = saved_errno;
-}
-} // namespace
 
 bool syscall_context::mock_enabled_for_current_thread() const noexcept
 {
@@ -866,7 +784,7 @@ long syscall_context::handle_sysbpf(int cmd, union bpf_attr *attr, size_t size)
 		}
 		memcpy((void *)(uintptr_t)attr->value, value_ptr,
 		       bpftime_map_value_size_from_syscall(attr->map_fd));
-		maybe_complete_system_analysis(
+		system_analysis_compat::maybe_complete_map_value(
 			attr->map_fd, (void *)(uintptr_t)attr->value);
 		return 0;
 	}
@@ -1038,20 +956,20 @@ long syscall_context::handle_sysbpf(int cmd, union bpf_attr *attr, size_t size)
 		return id;
 	}
 	case BPF_RAW_TRACEPOINT_OPEN: {
-		if (getenv("BPFTIME_SYSTEM_ANALYSIS_PTREGS_OFFSET") == nullptr)
+		auto compat_fd =
+			system_analysis_compat::try_open_raw_tracepoint(
+				attr, [this]() {
+					int fd = create_unlinked_mock_fd(true);
+					SPDLOG_DEBUG(
+						"Created system-analysis raw tracepoint handle {}",
+						fd);
+					return fd;
+				});
+		if (!compat_fd.has_value())
 			return orig_syscall_fn(__NR_bpf, (long)cmd,
-					       (long)(uintptr_t)attr,
-					       (long)size);
-		const char *name = reinterpret_cast<const char *>(
-			(uintptr_t)attr->raw_tracepoint.name);
-		if (name == nullptr || strcmp(name, "sys_enter") != 0)
-			return orig_syscall_fn(__NR_bpf, (long)cmd,
-					       (long)(uintptr_t)attr,
-					       (long)size);
-		int fd = create_unlinked_mock_fd(true);
-		SPDLOG_DEBUG("Created system-analysis raw tracepoint handle {}",
-			     fd);
-		return fd;
+					      (long)(uintptr_t)attr,
+					      (long)size);
+		return *compat_fd;
 	}
 	case BPF_MAP_FREEZE: {
 		if (run_with_kernel) {
