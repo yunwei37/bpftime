@@ -4,29 +4,10 @@
 #include <cerrno>
 #include <stdexcept>
 #include <string>
+#include <rootless_tracepoint_id.hpp>
 #include <syscall_trace_attach_private_data.hpp>
 using namespace bpftime::attach;
 
-int32_t syscall_trace_attach_private_data::synthetic_id_for_event(
-	const std::string_view &event)
-{
-	if (event == "raw_syscalls/sys_enter")
-		return synthetic_id_base;
-	if (event == "raw_syscalls/sys_exit")
-		return synthetic_id_base + 1;
-	constexpr std::string_view enter_prefix = "syscalls/sys_enter_";
-	constexpr std::string_view exit_prefix = "syscalls/sys_exit_";
-	bool enter = event.starts_with(enter_prefix);
-	if (!enter && !event.starts_with(exit_prefix))
-		return 0;
-	auto name = event.substr(enter ? enter_prefix.size() : exit_prefix.size());
-	const auto &names = std::get<0>(get_global_syscall_id_table());
-	auto found = names.find(std::string(name));
-	if (name.empty() || found == names.end() || found->second < 0 ||
-	    found->second >= (INT32_MAX - synthetic_id_base) / 2 - 1)
-		return 0;
-	return synthetic_id_base + 2 * (found->second + 1) + (enter ? 0 : 1);
-}
 
 int syscall_trace_attach_private_data::initialize_from_string(
 	const std::string_view &sv)
@@ -69,14 +50,18 @@ int syscall_trace_attach_private_data::initialize_from_string(
 		SPDLOG_ERROR("Invalid syscall trace private data {}", sv);
 		return -EINVAL;
 	}
-	if (tp_id >= synthetic_id_base) {
-		int offset = tp_id - synthetic_id_base;
-		int nr = offset / 2 - 1;
-		if (nr >= 0 &&
-		    !std::get<1>(get_global_syscall_id_table()).contains(nr))
+	// Decode through the neutral contract shared with the syscall server.
+	// Concrete syscall numbers are still validated against this module's
+	// own table; raw syscall events carry nr == -1 and skip the check.
+	if (auto decoded =
+		    bpftime::rootless_tracepoint::decode_synthetic_tracepoint_id(
+			    tp_id)) {
+		if (decoded->sys_nr >= 0 &&
+		    !std::get<1>(get_global_syscall_id_table())
+			     .contains(decoded->sys_nr))
 			return -EINVAL;
-		sys_nr = nr;
-		is_enter = offset % 2 == 0;
+		sys_nr = decoded->sys_nr;
+		is_enter = decoded->is_enter;
 		return 0;
 	}
 	SPDLOG_DEBUG(

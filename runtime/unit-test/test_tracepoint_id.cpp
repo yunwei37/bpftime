@@ -3,6 +3,7 @@
 #include "syscall_server_utils.hpp"
 #include "syscall_trace_attach_private_data.hpp"
 #include "syscall_trace_attach_impl.hpp"
+#include <rootless_tracepoint_id.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <boost/scope_exit.hpp>
 #include <dlfcn.h>
@@ -50,7 +51,7 @@ TEST_CASE("Tracepoint id provider preserves real IDs and resolves rootless alias
 {
 	test_tracepoint_probe = true;
 	BOOST_SCOPE_EXIT_ALL(&) { test_tracepoint_probe = false; test_tracepoint_fd = -1; };
-	constexpr int32_t expected = 0x40000000 + 2 * (SYS_read + 1);
+	constexpr int32_t expected = bpftime::rootless_tracepoint::SYNTHETIC_ID_BASE + 2 * (SYS_read + 1);
 	for (const char *root : { "/sys/kernel/tracing/events/", "/sys/kernel/debug/tracing/events/" }) {
 		auto provider = bpftime::create_mocked_file_based_on_full_path(
 			std::string(root) + "syscalls/sys_enter_read/id");
@@ -74,7 +75,7 @@ TEST_CASE("Rootless tracepoint IDs resolve before any callback table access")
 	using namespace bpftime::attach;
 	for (bool enter : { true, false }) {
 		syscall_trace_attach_private_data data;
-		const int id = 0x40000000 + 2 * (SYS_read + 1) + (enter ? 0 : 1);
+		const int id = bpftime::rootless_tracepoint::SYNTHETIC_ID_BASE + 2 * (SYS_read + 1) + (enter ? 0 : 1);
 		REQUIRE(data.initialize_from_string(std::to_string(id)) == 0);
 		REQUIRE(data.sys_nr == SYS_read);
 		REQUIRE(data.is_enter == enter);
@@ -90,11 +91,13 @@ TEST_CASE("Rootless tracepoint IDs resolve before any callback table access")
 		REQUIRE(calls == 1);
 		REQUIRE(attacher.detach_by_id(attached) == 0);
 	}
-	for (int id : { 0x40000000, 0x40000001 }) {
+	for (int id : { bpftime::rootless_tracepoint::RAW_SYS_ENTER_ID,
+		       bpftime::rootless_tracepoint::RAW_SYS_EXIT_ID }) {
 		syscall_trace_attach_private_data data;
 		REQUIRE(data.initialize_from_string(std::to_string(id)) == 0);
 		REQUIRE(data.sys_nr == -1);
-		REQUIRE(data.is_enter == (id == 0x40000000));
+		REQUIRE(data.is_enter ==
+			(id == bpftime::rootless_tracepoint::RAW_SYS_ENTER_ID));
 	}
 	syscall_trace_attach_private_data invalid;
 	REQUIRE(invalid.initialize_from_string(std::to_string(INT_MAX)) == -EINVAL);
@@ -104,15 +107,21 @@ TEST_CASE("Rootless tracepoint IDs resolve before any callback table access")
 }
 TEST_CASE("Rootless tracepoint IDs initialize concurrently")
 {
-	using bpftime::attach::syscall_trace_attach_private_data;
+	using bpftime::rootless_tracepoint::decode_synthetic_tracepoint_id;
+	using bpftime::rootless_tracepoint::encode_syscall_tracepoint_id;
 	std::barrier start(16);
 	std::atomic<int> matched{0};
 	std::vector<std::thread> workers;
 	for (int i = 0; i < 16; ++i)
 		workers.emplace_back([&] {
 			start.arrive_and_wait();
-			if (syscall_trace_attach_private_data::synthetic_id_for_event(
-				    "syscalls/sys_enter_read") == 0x40000000 + 2 * (SYS_read + 1))
+			// Every thread must observe the same producer/consumer
+			// mapping through the neutral contract.
+			auto id = encode_syscall_tracepoint_id(SYS_read, true);
+			auto decoded = decode_synthetic_tracepoint_id(id);
+			if (id == 0x40000000 + 2 * (SYS_read + 1) &&
+			    decoded.has_value() && decoded->sys_nr == SYS_read &&
+			    decoded->is_enter)
 				++matched;
 		});
 	for (auto &worker : workers)

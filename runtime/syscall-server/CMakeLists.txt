@@ -31,8 +31,15 @@ target_link_libraries(bpftime-syscall-server PUBLIC
     -ldl
     spdlog::spdlog)
 
+# Architecture invariant: bpftime-syscall-server MUST NOT link
+# bpftime_syscall_trace_attach_impl (or any other attach library). The
+# syscall server is a low-level runtime component; linking an attach
+# implementation inverts the layering and couples both sides. Rootless
+# tracepoint ids cross the boundary via the header-only
+# rootless_tracepoint_id contract. Only the generated syscall id table is
+# needed locally so the server can map event names to syscall numbers.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_link_libraries(bpftime-syscall-server PRIVATE bpftime_syscall_trace_attach_impl)
+    add_dependencies(bpftime-syscall-server syscall_id_table)
 endif()
 
 add_dependencies(bpftime-syscall-server spdlog::spdlog)

@@ -91,6 +91,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         ../syscall-server/syscall_server_utils.cpp
         ../syscall-server/syscall_context.cpp)
     target_include_directories(bpftime_runtime_tests PRIVATE ../syscall-server)
+    # The test binary may link both sides because it exercises the
+    # producer/consumer contract end to end; the product libraries
+    # themselves still must not depend on each other. The generated
+    # syscall id table is required by server-side id synthesis.
+    add_dependencies(bpftime_runtime_tests syscall_id_table)
     target_link_libraries(bpftime_runtime_tests PRIVATE bpftime_syscall_trace_attach_impl ${CMAKE_DL_LIBS})
     target_link_options(bpftime_runtime_tests PRIVATE -Wl,--wrap=dlsym)
     target_sources(bpftime_runtime_tests PRIVATE

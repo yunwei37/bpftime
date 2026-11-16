@@ -13,7 +13,13 @@
 #endif
 #include "syscall_context.hpp"
 #if __linux__
-#include "syscall_trace_attach_private_data.hpp"
+// Architecture invariant: the syscall server is a low-level runtime
+// component and MUST NOT include any attach/ header or link an attach
+// implementation library. Rootless tracepoint ids cross the component
+// boundary only through the neutral arithmetic contract in this header.
+#include <rootless_tracepoint_id.hpp>
+// Generated syscall name -> number table (syscall_id_table build target).
+#include <syscall_id_list.h>
 #endif
 #include <cstdint>
 #include <cerrno>
@@ -28,7 +34,9 @@
 #include <spdlog/spdlog.h>
 #include <bpftime_shm.hpp>
 #include <string>
+#include <sstream>
 #include <string_view>
+#include <unordered_map>
 #include <system_error>
 #include <unistd.h>
 #ifdef ENABLE_BPFTIME_VERIFIER
@@ -351,6 +359,64 @@ int determine_kprobe_retprobe_bit()
 	return parse_uint_from_file(KRETPROBE_BIT_FILE_NAME.c_str(),
 				    "config:%d\n");
 }
+#if __linux__
+namespace
+{
+// Syscall name -> number map built once from the generated table. This is
+// deliberately local to the syscall server: asking the attach module for
+// this mapping would recreate the reverse dependency the neutral
+// rootless_tracepoint_id contract exists to prevent.
+const std::unordered_map<std::string, int32_t> &
+rootless_syscall_name_to_nr()
+{
+	static const auto map = [] {
+		std::unordered_map<std::string, int32_t> built;
+		std::istringstream ss(table);
+		std::string name;
+		int32_t nr = 0;
+		while (ss >> name >> nr) {
+			built.emplace(name, nr);
+		}
+		// The tracepoint is named "umount" while the kernel syscall is
+		// umount2; expose the tracepoint spelling as a second key.
+		if (auto it = built.find("umount2"); it != built.end()) {
+			built.emplace("umount", it->second);
+		}
+		return built;
+	}();
+	return map;
+}
+
+// Produce a rootless synthetic tracepoint id for a tracefs event path
+// relative to the ".../events/" root. Returns 0 for events the contract
+// does not cover (for example sched tracepoints); the caller then returns
+// no mock provider instead of fabricating an undecodable id.
+int32_t
+rootless_synthetic_id_for_event(std::string_view event)
+{
+	using namespace bpftime::rootless_tracepoint;
+	if (event == "raw_syscalls/sys_enter") {
+		return RAW_SYS_ENTER_ID;
+	}
+	if (event == "raw_syscalls/sys_exit") {
+		return RAW_SYS_EXIT_ID;
+	}
+	constexpr std::string_view enter_prefix = "syscalls/sys_enter_";
+	constexpr std::string_view exit_prefix = "syscalls/sys_exit_";
+	bool is_enter = event.starts_with(enter_prefix);
+	if (!is_enter && !event.starts_with(exit_prefix)) {
+		return 0;
+	}
+	auto name = event.substr(
+		is_enter ? enter_prefix.size() : exit_prefix.size());
+	auto found = rootless_syscall_name_to_nr().find(std::string(name));
+	if (name.empty() || found == rootless_syscall_name_to_nr().end()) {
+		return 0;
+	}
+	return encode_syscall_tracepoint_id(found->second, is_enter);
+}
+} // namespace
+#endif
 std::optional<std::unique_ptr<mocked_file_provider>>
 create_mocked_file_based_on_full_path(const std::filesystem::path &path)
 {
@@ -370,14 +436,16 @@ create_mocked_file_based_on_full_path(const std::filesystem::path &path)
 		uint32_t real_id = 0;
 		if (read_real_tracepoint_id(path_text, real_id))
 			return {};
-		// Encode only syscall events understood by the receiving attach
-		// implementation. The same event has one ID under both mounts.
+		// Encode only events covered by the neutral rootless id contract.
+		// The same event resolves to one id under both tracefs mounts;
+		// uncovered events (for example sched tracepoints) get no mock
+		// instead of an id the attach side cannot decode.
 #if __linux__
 		const size_t root_size = path_text.starts_with(tracepoint_root) ?
 			tracepoint_root.size() : debug_tracepoint_root.size();
 		const auto event = std::string_view(path_text).substr(
 			root_size, path_text.size() - root_size - 3);
-		int32_t id = attach::syscall_trace_attach_private_data::synthetic_id_for_event(event);
+		int32_t id = rootless_synthetic_id_for_event(event);
 		if (id != 0)
 			return std::make_unique<mocked_file_provider>(std::to_string(id) + "\n");
 #endif
