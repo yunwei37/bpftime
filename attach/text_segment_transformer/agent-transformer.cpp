@@ -132,6 +132,16 @@ extern "C" void bpftime_agent_main(const gchar *data, gboolean *stay_resident)
 	// This transformer serves the in-process uprobe text-segment path only.
 	// Rootless seccomp capture is owned by bpftime-syscall-server now; do not
 	// install it here (loading frida/capstone on that path was the hang).
-	bpftime::setup_syscall_tracer();
-	SPDLOG_DEBUG("Transformer exiting, syscall trace is usable now");
+	// BPFTIME_SKIP_TEXT_SEGMENT_TRACER is an explicit rootless opt-out: the
+	// unprivileged bundle captures syscalls through seccomp USER_NOTIF in the
+	// syscall-server and memory events through the agent frida uprobe, so no
+	// process needs the global text-segment syscall rewrite. That rewrite hangs
+	// in torch/CUDA init (futex deadlock, GPU stays at 0%). The classic
+	// in-process frida deployment leaves this unset and keeps the full rewrite.
+	if (getenv("BPFTIME_SKIP_TEXT_SEGMENT_TRACER") == nullptr) {
+		bpftime::setup_syscall_tracer();
+		SPDLOG_DEBUG("Transformer exiting, syscall trace is usable now");
+	} else {
+		SPDLOG_INFO("Rootless opt-out: skipping text-segment syscall tracer");
+	}
 }
