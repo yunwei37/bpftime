@@ -50,7 +50,27 @@ int syscall_trace_attach_private_data::initialize_from_string(
 		SPDLOG_ERROR("Invalid syscall trace private data {}", sv);
 		return -EINVAL;
 	}
-	// Decode through the neutral contract shared with the syscall server.
+	// Sched reserved ids are not syscalls: resolve them before the syscall
+	// decoder so they never get misread as a syscall number.
+	using namespace bpftime::rootless_tracepoint;
+	if (tp_id == SCHED_FORK_ID) {
+		event = syscall_trace_event::sched_process_fork;
+		sys_nr = -1;
+		is_enter = true;
+		return 0;
+	}
+	if (tp_id == SCHED_EXEC_ID) {
+		event = syscall_trace_event::sched_process_exec;
+		sys_nr = -1;
+		is_enter = true;
+		return 0;
+	}
+	if (tp_id == SCHED_EXIT_ID) {
+		event = syscall_trace_event::sched_process_exit;
+		sys_nr = -1;
+		is_enter = true;
+		return 0;
+	}
 	// Concrete syscall numbers are still validated against this module's
 	// own table; raw syscall events carry nr == -1 and skip the check.
 	if (auto decoded =

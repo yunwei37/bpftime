@@ -46,6 +46,15 @@ inline constexpr int32_t SYNTHETIC_ID_BASE = 0x40000000;
 inline constexpr int32_t RAW_SYS_ENTER_ID = SYNTHETIC_ID_BASE;
 inline constexpr int32_t RAW_SYS_EXIT_ID = SYNTHETIC_ID_BASE + 1;
 
+// Sched tracepoints are not syscalls and therefore cannot use the per-syscall
+// interleaved encoding below. They get fixed high reserved slots so the
+// syscall-server producer can answer their ".../id" reads and the attach
+// consumer can map the id straight back to the sched event without a tracefs
+// table. Kept far above the per-syscall range (which grows from the base) to
+// avoid any collision.
+inline constexpr int32_t SCHED_FORK_ID = 0x40010000;
+inline constexpr int32_t SCHED_EXEC_ID = 0x40010001;
+inline constexpr int32_t SCHED_EXIT_ID = 0x40010002;
 struct decoded_syscall_event {
 	// Kernel syscall number, or -1 for the raw syscall enter/exit
 	// tracepoints that cover every syscall.
@@ -67,6 +76,29 @@ encode_syscall_tracepoint_id(int32_t sys_nr, bool is_enter)
 	return SYNTHETIC_ID_BASE + 2 * (sys_nr + 1) + (is_enter ? 0 : 1);
 }
 
+// Resolve a rootless sched tracepoint event path (relative to the
+// ".../events/" root, e.g. "sched/sched_process_fork") to its fixed reserved
+// id. Returns 0 for non-sched events so the caller falls back to the syscall
+// encoding / normal open path. constexpr string-only, no table or FS access.
+constexpr int32_t
+sched_tracepoint_id_for_event(std::string_view event)
+{
+	if (event == "sched/sched_process_fork")
+		return SCHED_FORK_ID;
+	if (event == "sched/sched_process_exec")
+		return SCHED_EXEC_ID;
+	if (event == "sched/sched_process_exit")
+		return SCHED_EXIT_ID;
+	return 0;
+}
+
+// True when an id is one of the fixed sched reserved slots.
+constexpr bool
+is_rootless_sched_id(int32_t id)
+{
+	return id == SCHED_FORK_ID || id == SCHED_EXEC_ID ||
+	       id == SCHED_EXIT_ID;
+}
 // True for any id in the reserved rootless range. A false result means the
 // id is an ordinary kernel tracepoint id and the consumer must keep its
 // existing tracefs-based resolution untouched.

@@ -410,6 +410,11 @@ int32_t
 rootless_synthetic_id_for_event(std::string_view event)
 {
 	using namespace bpftime::rootless_tracepoint;
+	// Sched tracepoints are not syscalls and use fixed reserved slots.
+	// Without these, the omni collector's sched_process_fork attach reads a
+	// missing tracefs id file and aborts in an unprivileged container.
+	if (int32_t sched = sched_tracepoint_id_for_event(event); sched != 0)
+		return sched;
 	if (event == "raw_syscalls/sys_enter") {
 		return RAW_SYS_ENTER_ID;
 	}
