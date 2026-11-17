@@ -134,12 +134,13 @@ TEST_CASE("Rootless sched tracepoint ids round-trip through the contract")
 {
 	using namespace bpftime::rootless_tracepoint;
 
-	// Producer side: sched event paths resolve to fixed reserved ids.
-	REQUIRE(rootless_synthetic_id_for_event("sched/sched_process_fork") ==
+	// Producer side: the contract constexpr resolver maps sched event paths
+	// to fixed reserved ids (the syscall-server wrapper calls this directly).
+	REQUIRE(sched_tracepoint_id_for_event("sched/sched_process_fork") ==
 		SCHED_FORK_ID);
-	REQUIRE(rootless_synthetic_id_for_event("sched/sched_process_exec") ==
+	REQUIRE(sched_tracepoint_id_for_event("sched/sched_process_exec") ==
 		SCHED_EXEC_ID);
-	REQUIRE(rootless_synthetic_id_for_event("sched/sched_process_exit") ==
+	REQUIRE(sched_tracepoint_id_for_event("sched/sched_process_exit") ==
 		SCHED_EXIT_ID);
 
 	// Recognized as sched slots, never confused with syscall ids.
