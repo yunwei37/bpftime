@@ -10,11 +10,6 @@
 #include <fcntl.h>
 #include <frida-gum.h>
 #if defined(__linux__) && defined(__x86_64__)
-#include <linux/audit.h>
-#include <linux/filter.h>
-#include <linux/seccomp.h>
-#include <sys/ioctl.h>
-#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/vfs.h>

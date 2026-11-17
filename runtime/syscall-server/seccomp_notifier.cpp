@@ -13,6 +13,7 @@
 #if defined(__linux__) && defined(__x86_64__)
 #include "seccomp_raw_syscall.hpp"
 #include "seccomp_tracer.hpp"
+#include "seccomp_bpf_compat.hpp"
 #include "syscall_server_internal_dispatch.hpp"
 #include <algorithm>
 #include <atomic>
@@ -21,7 +22,7 @@
 #include <fcntl.h>
 #include <linux/audit.h>
 #include <linux/filter.h>
-#include "seccomp_bpf_compat.hpp"
+
 #include <linux/seccomp.h>
 #include <mutex>
 #include <optional>
@@ -33,7 +34,9 @@
 #include <sys/syscall.h>
 #include <sys/vfs.h>
 #include <thread>
+#include <unistd.h>
 #include <unordered_map>
+
 
 namespace bpftime
 {
@@ -44,6 +47,7 @@ namespace seccomp
 static std::mutex dispatch_mutex;
 static const char *kallsyms_path;
 static std::atomic<int> go_seccomp_listener{ -1 };
+
 
 struct mapped_file_resolution {
 	std::string logical_path;
@@ -263,6 +267,7 @@ static void start_go_seccomp_workers()
 						return;
 					}
 					received = true;
+
 					int64_t args[] = {
 						(int64_t)request.data.nr,
 						(int64_t)request.data.args[0],

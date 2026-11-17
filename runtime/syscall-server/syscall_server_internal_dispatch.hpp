@@ -23,4 +23,10 @@
 long dispatch_syscall(long sysno, long arg1, long arg2, long arg3, long arg4,
 		      long arg5, long arg6) noexcept;
 
+// Run the one-time fake-kernel/SHM initialization before any seccomp filter
+// is installed. Calling it lazily from inside a seccomp worker deadlocks: the
+// startup path itself issues whitelisted syscalls (close/mmap/...) that the
+// not-yet-initialized workers cannot answer. Returns 0 on success. Internal to
+// this shared object; not exported.
+int bpftime_syscall_server_prewarm() noexcept;
 #endif
