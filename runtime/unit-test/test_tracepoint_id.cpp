@@ -129,3 +129,31 @@ TEST_CASE("Rootless tracepoint IDs initialize concurrently")
 	REQUIRE(matched == 16);
 }
 #endif
+
+TEST_CASE("Rootless sched tracepoint ids round-trip through the contract")
+{
+	using namespace bpftime::rootless_tracepoint;
+
+	// Producer side: sched event paths resolve to fixed reserved ids.
+	REQUIRE(rootless_synthetic_id_for_event("sched/sched_process_fork") ==
+		SCHED_FORK_ID);
+	REQUIRE(rootless_synthetic_id_for_event("sched/sched_process_exec") ==
+		SCHED_EXEC_ID);
+	REQUIRE(rootless_synthetic_id_for_event("sched/sched_process_exit") ==
+		SCHED_EXIT_ID);
+
+	// Recognized as sched slots, never confused with syscall ids.
+	REQUIRE(is_rootless_sched_id(SCHED_FORK_ID));
+	REQUIRE(is_rootless_sched_id(SCHED_EXEC_ID));
+	REQUIRE(is_rootless_sched_id(SCHED_EXIT_ID));
+	REQUIRE_FALSE(is_rootless_sched_id(RAW_SYS_ENTER_ID));
+
+	// Non-sched events get no sched id and fall through to other handling.
+	REQUIRE(sched_tracepoint_id_for_event("syscalls/sys_enter_read") == 0);
+	REQUIRE(sched_tracepoint_id_for_event("nope/not-an-event") == 0);
+
+	// Ids stay in the rootless reserved range, distinct from each other.
+	REQUIRE(is_rootless_synthetic_id(SCHED_FORK_ID));
+	REQUIRE(SCHED_FORK_ID != SCHED_EXEC_ID);
+	REQUIRE(SCHED_EXEC_ID != SCHED_EXIT_ID);
+}

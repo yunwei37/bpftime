@@ -7,9 +7,11 @@
 #define _SYSCALL_SERVER_UTILS_HPP
 
 #include "syscall_context.hpp"
+#include <rootless_tracepoint_id.hpp>
 #include <cstdint>
 #include <optional>
 #include <filesystem>
+#include <string_view>
 
 namespace bpftime
 {
@@ -27,4 +29,10 @@ constexpr uint64_t PERF_UPROBE_REF_CTR_OFFSET_BITS = 32;
 constexpr uint64_t PERF_UPROBE_REF_CTR_OFFSET_SHIFT = 32;
 
 } // namespace bpftime
+
+// Rootless tracepoint id synthesis. Defined in the .cpp at global scope
+// (outside namespace bpftime); declared here so the file factory and unit
+// tests share one prototype.
+int32_t rootless_synthetic_id_for_event(std::string_view event);
+
 #endif
