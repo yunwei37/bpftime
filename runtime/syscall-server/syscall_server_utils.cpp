@@ -15,6 +15,7 @@
 #include "synthetic_kallsyms.hpp"
 #if __linux__
 #include "syscall_trace_attach_private_data.hpp"
+#include "syscall_table.hpp"
 #endif
 #include <cstdint>
 #include <cerrno>
@@ -449,6 +450,16 @@ create_mocked_file_based_on_full_path(const std::filesystem::path &path)
 		int32_t id = attach::syscall_trace_attach_private_data::synthetic_id_for_event(event);
 		if (id != 0)
 			return std::make_unique<mocked_file_provider>(std::to_string(id) + "\n");
+		// synthetic_id_for_event only encodes syscalls/sys_enter_* and
+		// syscalls/sys_exit_*. Every other tracepoint (sched/...,
+		// raw_syscalls/...) falls back to the same path-derived id used
+		// to build the rootless tracepoint table, so the id the profiler
+		// reads resolves back to this event when it attaches. Without
+		// this fallback an unreadable tracefs id file yields ENOENT and
+		// an unmodified profiler aborts during startup.
+		return std::make_unique<mocked_file_provider>(
+			std::to_string(attach::synthetic_tracepoint_id(path_text)) +
+			"\n");
 #endif
 		return {};
 	}

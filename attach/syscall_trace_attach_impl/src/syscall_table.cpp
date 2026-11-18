@@ -14,15 +14,6 @@
 static const char *SYSCALL_TRACEPOINT_ROOT =
 	"/sys/kernel/tracing/events/syscalls";
 static const char *TRACEPOINT_ROOT = "/sys/kernel/tracing/events";
-static int32_t synthetic_tracepoint_id(const std::string &path)
-{
-	uint32_t hash = 2166136261U;
-	for (unsigned char ch : path) {
-		hash ^= ch;
-		hash *= 16777619U;
-	}
-	return (int32_t)(1024U + hash % 100000000U);
-}
 
 static bpftime::attach::syscall_id_pair generate_syscall_id_table()
 {
@@ -57,6 +48,21 @@ namespace bpftime
 
 namespace attach
 {
+// Stable synthetic tracepoint id derived from the full tracefs ".../id"
+// path. This is the single source of truth shared by the rootless
+// tracepoint table (built below) and the syscall server mock that serves an
+// unreadable tracefs id file, so both sides derive the same value for a
+// given event.
+int32_t synthetic_tracepoint_id(const std::string &id_path)
+{
+	uint32_t hash = 2166136261U;
+	for (unsigned char ch : id_path) {
+		hash ^= ch;
+		hash *= 16777619U;
+	}
+	return (int32_t)(1024U + hash % 100000000U);
+}
+
 const syscall_id_pair &get_global_syscall_id_table()
 {
 	static const syscall_id_pair value = generate_syscall_id_table();

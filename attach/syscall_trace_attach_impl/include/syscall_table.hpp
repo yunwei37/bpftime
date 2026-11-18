@@ -22,6 +22,9 @@ syscall_tracepoint_table create_syscall_tracepoint_id_table();
 const syscall_tracepoint_table &get_global_syscall_tracepoint_name_table();
 // Get the name mapping of syscall name (not tracepoint name) <-> syscall id
 const syscall_id_pair &get_global_syscall_id_table();
+// Stable synthetic id for a full tracefs ".../id" path. Shared by the
+// rootless tracepoint table and the syscall server tracefs mock.
+int32_t synthetic_tracepoint_id(const std::string &id_path);
 
 // Dummy name for a syscall tracepoint that handles the enter of all syscalls
 constexpr const char *GLOBAL_SYS_ENTER_NAME = "*SYS_ENTER";
