@@ -118,7 +118,6 @@ jobs:
           cmake -Bbuild -DCMAKE_BUILD_TYPE:STRING=RelWithDebInfo \
             -DBPFTIME_LLVM_JIT=1 \
             -DBUILD_BPFTIME_DAEMON=OFF \
-            -DBUILD_AGENT=1 \
             -DBPFTIME_ENABLE_CUDA_ATTACH=OFF \
             -DTEST_LCOV=YES \
             -DCMAKE_CXX_FLAGS="-DDEFAULT_LOGGER_OUTPUT_PATH='\"console\"'"
@@ -457,7 +456,6 @@ jobs:
           cmake -Bbuild -DCMAKE_BUILD_TYPE:STRING=RelWithDebInfo \
             -DBPFTIME_LLVM_JIT=1 \
             -DBUILD_BPFTIME_DAEMON=OFF \
-            -DBUILD_AGENT=1 \
             -DBPFTIME_ENABLE_CUDA_ATTACH=OFF \
             -DTEST_LCOV=YES \
             -DCMAKE_CXX_FLAGS="-DDEFAULT_LOGGER_OUTPUT_PATH='\"console\"'"
@@ -825,7 +823,6 @@ jobs:
           cmake -Bbuild -DCMAKE_BUILD_TYPE:STRING=RelWithDebInfo \
             -DBPFTIME_LLVM_JIT=1 \
             -DBUILD_BPFTIME_DAEMON=OFF \
-            -DBUILD_AGENT=1 \
             -DBPFTIME_ENABLE_CUDA_ATTACH=OFF \
             -DCMAKE_CXX_FLAGS="-DDEFAULT_LOGGER_OUTPUT_PATH='\"console\"'" \
             -DSPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_${{ matrix.log_level }}
