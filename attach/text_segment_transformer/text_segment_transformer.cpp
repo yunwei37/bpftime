@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <string>
 #include <cinttypes>
+#include "agent_defaults.hpp"
 #include "text_segment_transformer.hpp"
 #include <frida-gum.h>
 /*
@@ -536,12 +537,17 @@ bool setup_syscall_tracer()
 	}
 	SPDLOG_INFO("Rewriting executable segments..");
 	std::string agent_path;
-	if (const char *agent_so = getenv("AGENT_SO"); agent_so != nullptr) {
-		if (char *resolved = realpath(agent_so, nullptr); resolved != nullptr) {
+	const std::string configured_agent_so = bpftime::resolve_agent_so_path(
+		getenv("AGENT_SO"),
+		reinterpret_cast<const void *>(&setup_syscall_tracer));
+	if (!configured_agent_so.empty()) {
+		if (char *resolved = realpath(configured_agent_so.c_str(),
+					       nullptr);
+		    resolved != nullptr) {
 			agent_path = resolved;
 			free(resolved);
 		} else {
-			agent_path = agent_so;
+			agent_path = configured_agent_so;
 		}
 	}
 	std::string transformer_path;

@@ -23,3 +23,7 @@ if (${TEST_LCOV})
     target_compile_options(bpftime_text_segment_transformer PRIVATE -fprofile-arcs -ftest-coverage -fprofile-update=atomic)
     target_link_options(bpftime_text_segment_transformer PRIVATE -fprofile-arcs)
 endif()
+
+if(BPFTIME_ENABLE_UNIT_TESTING AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_subdirectory(test)
+endif()

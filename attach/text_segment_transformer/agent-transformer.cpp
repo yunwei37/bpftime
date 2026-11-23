@@ -11,6 +11,7 @@
 #include <frida-gum.h>
 #include <mutex>
 #include <optional>
+#include "agent_defaults.hpp"
 #include "text_segment_transformer.hpp"
 
 #include <string>
@@ -61,31 +62,39 @@ extern "C" void bpftime_agent_main(const gchar *data, gboolean *stay_resident)
 	/* We don't want to our library to be unloaded after we return. */
 	*stay_resident = TRUE;
 
-	const char *agent_so = getenv("AGENT_SO");
-	if (agent_so == nullptr) {
-		if (std::string(data) != "") {
-			SPDLOG_INFO("Using agent path from frida data..");
-			agent_so = data;
-		} else {
+	const char *agent_so_env = getenv("AGENT_SO");
+	std::string resolved_agent_so;
+	const char *agent_so = nullptr;
+	if (agent_so_env != nullptr && agent_so_env[0] != '\0') {
+		agent_so = agent_so_env;
+	} else if (std::string(data) != "") {
+		SPDLOG_INFO("Using agent path from frida data..");
+		agent_so = data;
+	} else {
+		// Default: the agent ships in the same directory as this
+		// transformer, so no AGENT_SO setup is required for a
+		// plain LD_PRELOAD deployment.
+		resolved_agent_so = bpftime::resolve_agent_so_path(
+			agent_so_env,
+			reinterpret_cast<const void *>(&bpftime_agent_main));
+		if (resolved_agent_so.empty()) {
 			SPDLOG_ERROR(
-				"Please set AGENT_SO to the bpftime-agent when use this tranformer");
+				"Could not find libbpftime-agent.so next to the transformer; set AGENT_SO to its path");
 			return;
 		}
-	}
-	if (!agent_so) {
-		SPDLOG_CRITICAL(
-			"Please set AGENT_SO to the bpftime-agent when use this tranformer");
-		return;
+		SPDLOG_INFO("Using sibling agent {}", resolved_agent_so);
+		agent_so = resolved_agent_so.c_str();
 	}
 	SPDLOG_DEBUG("Using agent {}", agent_so);
 	cs_arch_register_x86();
 	SPDLOG_DEBUG("Loading dynamic library..");
-	const bool use_same_namespace =
-		getenv("BPFTIME_AGENT_USE_DLOPEN") != nullptr;
-	auto next_handle = use_same_namespace ?
-				   dlopen(agent_so, RTLD_NOW | RTLD_LOCAL) :
-				   dlmopen(LM_ID_NEWLM, agent_so,
-					   RTLD_NOW | RTLD_LOCAL);
+	// dlopen() in the current link namespace is the default; the isolated
+	// dlmopen() namespace stays available via BPFTIME_AGENT_USE_DLMOPEN.
+	const bool use_same_namespace = bpftime::agent_should_use_dlopen();
+	void *next_handle =
+		use_same_namespace ?
+			dlopen(agent_so, RTLD_NOW | RTLD_LOCAL) :
+			dlmopen(LM_ID_NEWLM, agent_so, RTLD_NOW | RTLD_LOCAL);
 	if (next_handle == nullptr) {
 		SPDLOG_ERROR("Failed to open agent: {}", dlerror());
 		return;

@@ -354,7 +354,7 @@ bpftimetool run 0 input.bin repeat 10000 type JIT
 - `HOME`: Used to determine default installation location (`~/.bpftime`)
 - `PATH`: Should include bpftime installation directory after installation
 - `LD_PRELOAD`: Automatically set by the tool when injecting libraries
-- `AGENT_SO`: Used internally to specify the agent library path
+- `AGENT_SO`: Optional override for the agent library path; when unset or empty the transformer loads `libbpftime-agent.so` from its own directory
 
 ### Platform-Specific Libraries
 The tools automatically use the correct library names based on platform:

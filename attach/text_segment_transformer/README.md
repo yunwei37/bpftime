@@ -50,10 +50,22 @@ There are two ways to use the transformer:
 
 ### 1. Preload Method
 
+No environment setup is needed when `libbpftime-agent.so` is installed in
+the same directory as `libbpftime-agent-transformer.so`:
+
 ```bash
-# Set environment variables
-export AGENT_SO=/path/to/bpftime-agent.so
-LD_PRELOAD=/path/to/bpftime-agent-transformer.so your_program
+LD_PRELOAD=/path/to/libbpftime-agent-transformer.so your_program
+```
+
+The transformer locates the sibling agent through `dladdr()` and loads it
+with `dlopen()` in the current link namespace. Optional overrides:
+
+```bash
+# Use an agent outside the transformer directory
+export AGENT_SO=/other/path/libbpftime-agent.so
+# Load the agent in an isolated link namespace (legacy behavior)
+export BPFTIME_AGENT_USE_DLMOPEN=1
+LD_PRELOAD=/path/to/libbpftime-agent-transformer.so your_program
 ```
 
 ### 2. Frida Injection
