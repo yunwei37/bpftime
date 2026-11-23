@@ -66,6 +66,12 @@ inline void bpftime_set_logger(const std::string &target) noexcept
 			// stderr.
 			sink = std::make_shared<
 				spdlog::sinks::stderr_color_sink_mt>();
+		} else if (logger_target == "null" ||
+			   logger_target == "silent") {
+			// Explicit silent sink: no stdio and no file I/O, so
+			// logging can never contend on a stdio lock. This is
+			// the safe default on the seccomp interception path.
+			sink = std::make_shared<spdlog::sinks::null_sink_mt>();
 		} else {
 			constexpr size_t max_size = 1048576 * 5;
 			constexpr size_t max_files = 3;

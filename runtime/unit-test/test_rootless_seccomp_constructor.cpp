@@ -6,12 +6,12 @@
  * End-to-end coverage for the rootless seccomp constructor in
  * bpftime-syscall-server. The helper binaries are launched through a real
  * LD_PRELOAD of the built shared object:
- *
  *  - a custom-_start helper never runs glibc __libc_start_main, so only the
  *    dynamic-loader constructor can arm the seccomp USER_NOTIF filter;
  *  - an ordinary glibc helper exercises both the constructor and the
  *    __libc_start_main interposer, proving the atomic guard arms once;
- *  - without BPFTIME_GO_SECCOMP the preload stays side-effect free.
+ *  - arming is the default for a preloaded library; setting
+ *    BPFTIME_RUN_WITH_KERNEL keeps the preload side-effect free.
  */
 #include "catch2/catch_test_macros.hpp"
 
@@ -63,7 +63,7 @@ parse_seccomp_mode(const std::string &output)
 }
 
 helper_run
-run_start_helper(const char *helper_path, bool preload, bool enable_go_seccomp)
+run_start_helper(const char *helper_path, bool preload, bool kernel_mode)
 {
 	const std::string shm_name = "bpftime-rootless-constructor-test-" +
 				     std::to_string(getpid());
@@ -82,6 +82,13 @@ run_start_helper(const char *helper_path, bool preload, bool enable_go_seccomp)
 		close(output_pipe[1]);
 		unsetenv("BPFTIME_LOG_OUTPUT");
 		unsetenv("SPDLOG_LEVEL");
+		// The interception path logs to the silent null sink by default,
+		// so a case that needs to observe the arming marker must opt
+		// into console logging explicitly. Kernel-mode and non-preload
+		// runs stay silent.
+		if (preload && !kernel_mode &&
+		    setenv("BPFTIME_LOG_OUTPUT", "console", 1) != 0)
+			_exit(126);
 		if (setenv("BPFTIME_GLOBAL_SHM_NAME", shm_name.c_str(), 1) !=
 		    0)
 			_exit(126);
@@ -91,11 +98,14 @@ run_start_helper(const char *helper_path, bool preload, bool enable_go_seccomp)
 			_exit(126);
 		if (!preload)
 			unsetenv("LD_PRELOAD");
-		if (enable_go_seccomp &&
-		    setenv("BPFTIME_GO_SECCOMP", "1", 1) != 0)
+		// The legacy opt-in variable must have no effect anymore:
+		// arming depends only on the kernel-mode opt-out.
+		unsetenv("BPFTIME_GO_SECCOMP");
+		if (kernel_mode &&
+		    setenv("BPFTIME_RUN_WITH_KERNEL", "1", 1) != 0)
 			_exit(126);
-		if (!enable_go_seccomp)
-			unsetenv("BPFTIME_GO_SECCOMP");
+		if (!kernel_mode)
+			unsetenv("BPFTIME_RUN_WITH_KERNEL");
 		execl(helper_path, helper_path, nullptr);
 		_exit(127);
 	}
@@ -148,7 +158,7 @@ TEST_CASE("Loader constructor arms seccomp in a process bypassing "
 	REQUIRE(baseline_mode >= 0);
 
 	auto armed = run_start_helper(BPFTIME_ROOTLESS_CUSTOM_START_HELPER,
-				      true, true);
+				      true, false);
 	REQUIRE(WIFEXITED(armed.status));
 	REQUIRE(WEXITSTATUS(armed.status) == 0);
 	REQUIRE(parse_seccomp_mode(armed.output) == 2);
@@ -164,14 +174,14 @@ TEST_CASE("Loader constructor arms seccomp in a process bypassing "
 		REQUIRE(baseline_mode != 2);
 }
 
-TEST_CASE("Preload without BPFTIME_GO_SECCOMP stays side-effect free",
+TEST_CASE("Preload in kernel mode stays side-effect free",
 	  "[rootless][seccomp][constructor]")
 {
 	auto baseline =
 		run_start_helper(BPFTIME_ROOTLESS_CUSTOM_START_HELPER, false,
 				 false);
 	auto quiet = run_start_helper(BPFTIME_ROOTLESS_CUSTOM_START_HELPER,
-				      true, false);
+				      true, true);
 	REQUIRE(WIFEXITED(quiet.status));
 	REQUIRE(WEXITSTATUS(quiet.status) == 0);
 	REQUIRE(parse_seccomp_mode(quiet.output) ==
@@ -185,7 +195,7 @@ TEST_CASE("Constructor and __libc_start_main arm the filter exactly once",
 	  "[rootless][seccomp][constructor]")
 {
 	auto armed = run_start_helper(BPFTIME_ROOTLESS_NORMAL_START_HELPER,
-				      true, true);
+				      true, false);
 	INFO("helper killed by signal " << armed.term_signal
 	     << ", output: " << armed.output);
 	REQUIRE(WIFEXITED(armed.status));

@@ -316,8 +316,6 @@ static void start_go_seccomp_workers()
 
 static bool setup_go_seccomp_tracer()
 {
-	if (getenv("BPFTIME_GO_SECCOMP") == nullptr)
-		return false;
 	kallsyms_path = getenv("BPFTIME_KALLSYMS_PATH");
 	start_go_seccomp_workers();
 	struct sock_filter filter[] = {
@@ -377,7 +375,8 @@ static bool setup_go_seccomp_tracer()
 
 bool install_seccomp_tracer()
 {
-	if (getenv("BPFTIME_GO_SECCOMP") == nullptr)
+	// Kernel mode leaves bpf()/perf_event_open() to the real kernel.
+	if (getenv("BPFTIME_RUN_WITH_KERNEL") != nullptr)
 		return false;
 	try {
 		return setup_go_seccomp_tracer();

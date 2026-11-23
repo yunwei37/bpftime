@@ -103,7 +103,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     endif()
     target_sources(bpftime_runtime_tests PRIVATE
         test_get_current_uid_gid.cpp
-        test_get_current_comm.cpp)
+        test_get_current_comm.cpp
+        test_system_analysis_defaults.cpp)
     target_link_options(bpftime_runtime_tests PRIVATE
         -Wl,--wrap=getuid -Wl,--wrap=getgid
         # Runtime unit tests require BPFTIME_BUILD_WITH_LIBBPF.

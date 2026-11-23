@@ -36,9 +36,11 @@ std::atomic<bool> g_rootless_seccomp_armed{false};
 
 void rootless_arm_seccomp()
 {
-	// Keep the env gate ahead of every side effect: a preload without
-	// BPFTIME_GO_SECCOMP must behave exactly as if this library were absent.
-	if (getenv("BPFTIME_GO_SECCOMP") == nullptr)
+	// The preload is opted in explicitly through LD_PRELOAD, so arming is the
+	// default: intercepting bpf()/perf_event_open() in userspace is the whole
+	// point of loading this library. BPFTIME_RUN_WITH_KERNEL is the single
+	// opt-out: in kernel mode those syscalls must reach the real kernel.
+	if (getenv("BPFTIME_RUN_WITH_KERNEL") != nullptr)
 		return;
 	bool expected = false;
 	if (!g_rootless_seccomp_armed.compare_exchange_strong(expected, true))
@@ -48,14 +50,16 @@ void rootless_arm_seccomp()
 	// __libc_start_main interposer), so no exception may escape: fail open
 	// and leave the host running with ordinary syscalls.
 	try {
-		// Worker threads log through interposed syscalls; a rotating
-		// file sink makes a worker's spdlog flush contend with the main
-		// thread's stdio lock during fclose and deadlock. Default to
-		// console on the rootless path only: an ordinary
-		// BPFTIME_LOG_OUTPUT-less preload must keep writing its log
-		// file, as the startup tests assert no host stdio.
+		// Seccomp worker threads log while answering intercepted
+		// syscalls. Any FILE*-based sink (rotating file or console)
+		// can contend on the glibc stdio lock with the main thread
+		// during fclose and self-deadlock, and console output would
+		// pollute the host process's stderr. Default to the silent
+		// null sink, which does no I/O and takes no stdio lock; an
+		// explicit BPFTIME_LOG_OUTPUT (console or a file path) still
+		// overrides it for diagnostics.
 		if (getenv("BPFTIME_LOG_OUTPUT") == nullptr)
-			setenv("BPFTIME_LOG_OUTPUT", "console", 1);
+			setenv("BPFTIME_LOG_OUTPUT", "null", 1);
 
 		// Finish the one-time fake-kernel/SHM startup BEFORE installing
 		// the filter. The startup path issues whitelisted syscalls;

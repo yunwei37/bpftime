@@ -251,8 +251,32 @@ struct system_analysis_compat_value {
 	uint8_t code[128];
 };
 
-void maybe_complete_system_analysis(int map_fd, void *value)
+// Default pt_regs stack offset for the emulated sys_enter raw tracepoint in
+// userspace mode. An unprivileged process cannot probe the real kernel entry
+// stack (the kernel rejects BPF_RAW_TRACEPOINT_OPEN with EPERM), so the
+// synthetic handle and this fixed offset make system-analysis tooling work
+// without any environment setup. The env var remains as an override for
+// environments that need a different offset.
+constexpr unsigned long DEFAULT_SYSTEM_ANALYSIS_PTREGS_OFFSET = 4096;
+
+unsigned long resolve_system_analysis_ptregs_offset(const char *offset_text)
 {
+	if (offset_text == nullptr)
+		return DEFAULT_SYSTEM_ANALYSIS_PTREGS_OFFSET;
+	char *end = nullptr;
+	errno = 0;
+	unsigned long offset = strtoul(offset_text, &end, 0);
+	if (errno != 0 || end == offset_text || *end != '\0' ||
+	    offset > UINT32_MAX)
+		return DEFAULT_SYSTEM_ANALYSIS_PTREGS_OFFSET;
+	return offset;
+}
+
+void maybe_complete_system_analysis(int map_fd, void *value,
+				    bool run_with_kernel)
+{
+	if (run_with_kernel)
+		return;
 	const char *offset_text =
 		getenv("BPFTIME_SYSTEM_ANALYSIS_PTREGS_OFFSET");
 #if defined(__x86_64__)
@@ -264,9 +288,6 @@ void maybe_complete_system_analysis(int map_fd, void *value)
 	const char *tpbase_address_text = nullptr;
 	const char *tpbase_offset_text = nullptr;
 #endif
-	if (offset_text == nullptr &&
-	    (tpbase_address_text == nullptr || tpbase_offset_text == nullptr))
-		return;
 	bpftime::bpf_map_attr map_attr;
 	const char *map_name = nullptr;
 	bpftime::bpf_map_type map_type;
@@ -306,14 +327,8 @@ void maybe_complete_system_analysis(int map_fd, void *value)
 		}
 	}
 #endif
-	if (offset_text == nullptr)
-		return;
-	char *end = nullptr;
-	errno = 0;
-	unsigned long offset = strtoul(offset_text, &end, 0);
-	if (errno != 0 || end == offset_text || *end != '\0' ||
-	    offset > UINT32_MAX)
-		return;
+	const unsigned long offset =
+		resolve_system_analysis_ptregs_offset(offset_text);
 	if (analysis->pid == 0 || analysis->address >= 4096) {
 		errno = saved_errno;
 		return;
@@ -865,7 +880,8 @@ long syscall_context::handle_sysbpf(int cmd, union bpf_attr *attr, size_t size)
 		memcpy((void *)(uintptr_t)attr->value, value_ptr,
 		       bpftime_map_value_size_from_syscall(attr->map_fd));
 		maybe_complete_system_analysis(
-			attr->map_fd, (void *)(uintptr_t)attr->value);
+			attr->map_fd, (void *)(uintptr_t)attr->value,
+			run_with_kernel);
 		return 0;
 	}
 	case BPF_MAP_UPDATE_ELEM: {
@@ -1039,7 +1055,10 @@ long syscall_context::handle_sysbpf(int cmd, union bpf_attr *attr, size_t size)
 		return id;
 	}
 	case BPF_RAW_TRACEPOINT_OPEN: {
-		if (getenv("BPFTIME_SYSTEM_ANALYSIS_PTREGS_OFFSET") == nullptr)
+		// Userspace mode emulates the sys_enter probe with a synthetic
+		// handle and the default pt_regs offset; kernel mode and any
+		// other tracepoint name pass through to the real kernel.
+		if (run_with_kernel)
 			return orig_syscall_fn(__NR_bpf, (long)cmd,
 					       (long)(uintptr_t)attr,
 					       (long)size);
@@ -1403,7 +1422,10 @@ int syscall_context::handle_ioctl(int fd, unsigned long req, unsigned long data)
 		*reinterpret_cast<uint64_t *>(data) = static_cast<uint64_t>(fd);
 		return 0;
 	}
-	SPDLOG_WARN("Calling original ioctl: {} {} {}", fd, req, data);
+	// Unknown ioctls (including the seccomp notifier fd's own RECV/SEND)
+	// are passed through on the hot path; debug level keeps them available
+	// for diagnosis without flooding production logs at warn level.
+	SPDLOG_DEBUG("Calling original ioctl: {} {} {}", fd, req, data);
 	return orig_ioctl_fn(fd, req, data);
 }
 

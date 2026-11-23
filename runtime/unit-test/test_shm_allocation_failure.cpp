@@ -392,17 +392,32 @@ TEST_CASE("Global log level cannot enable default host stdio",
 TEST_CASE("File logger is installed before syscall startup",
 	  "[allocation][syscall_server][logging]")
 {
+	// A FILE*-based rotating log sink and the seccomp worker threads are
+	// incompatible: worker logging through a stdio FILE can race process
+	// teardown. The default interception path therefore uses a silent
+	// null sink. To exercise the file-logger ordering guarantee without
+	// arming seccomp, run the startup helper in kernel mode (seccomp is
+	// not installed) with enough SHM to complete full startup.
+	const bool had_kernel = getenv("BPFTIME_RUN_WITH_KERNEL") != nullptr;
+	const std::string previous_kernel =
+		had_kernel ? getenv("BPFTIME_RUN_WITH_KERNEL") : "";
+	REQUIRE(setenv("BPFTIME_RUN_WITH_KERNEL", "1", 1) == 0);
+
 	const std::string log_path = "/tmp/bpftime-syscall-startup-" +
 				     std::to_string(getpid()) + ".log";
 	unlink(log_path.c_str());
-	auto result = run_allocation_helper("perf-mmap", "4", "128",
+	auto result = run_allocation_helper("startup", "256", "1048576",
 					    log_path.c_str());
+	if (had_kernel)
+		setenv("BPFTIME_RUN_WITH_KERNEL", previous_kernel.c_str(), 1);
+	else
+		unsetenv("BPFTIME_RUN_WITH_KERNEL");
 	std::ifstream log(log_path);
 	std::string contents{ std::istreambuf_iterator<char>(log), {} };
 	unlink(log_path.c_str());
 
 	REQUIRE(WIFEXITED(result.status));
-	REQUIRE(WEXITSTATUS(result.status) == 0);
+	REQUIRE(WEXITSTATUS(result.status) == 100);
 	REQUIRE(result.output.empty());
 	REQUIRE(contents.find("Starting syscall server") != std::string::npos);
 	REQUIRE(contents.find("bpftime-syscall-server started") !=

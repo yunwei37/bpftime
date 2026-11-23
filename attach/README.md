@@ -32,10 +32,12 @@ mutually exclusive (selected at runtime):
   a standalone injected shared object. It contains no seccomp code.
 - The **seccomp user-notification tracer** lives in
   `runtime/syscall-server/` (see `seccomp_notifier.cpp` and
-  `seccomp_tracer.hpp`). Gated by `BPFTIME_GO_SECCOMP`, it installs a kernel
-  seccomp user-notification filter that also catches runtimes (e.g. Go) which
-  issue raw syscall instructions and bypass libc, using its own
-  frida-independent raw syscall helper.
+  `seccomp_tracer.hpp`). It is armed by default when the syscall server is
+  preloaded, and installs a kernel seccomp user-notification filter that also
+  catches runtimes (e.g. Go) which issue raw syscall instructions and bypass
+  libc, using its own frida-independent raw syscall helper.
+  `BPFTIME_RUN_WITH_KERNEL=1` is the opt-out that leaves the syscalls to the
+  kernel.
 
 The syscall server (`runtime/syscall-server/`) owns this seccomp hook and uses
 the same tracer for its no-agent rootless path.

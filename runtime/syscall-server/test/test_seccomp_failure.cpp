@@ -166,22 +166,20 @@ __wrap_prctl(int, ...)
 
 TEST_CASE("Failed seccomp installation cancels waiting workers")
 {
-	REQUIRE(setenv("BPFTIME_GO_SECCOMP", "1", 1) == 0);
+	unsetenv("BPFTIME_RUN_WITH_KERNEL");
 	bpftime::seccomp::go_seccomp_listener.store(-1);
 	const bool installed = bpftime::seccomp::install_seccomp_tracer();
-	unsetenv("BPFTIME_GO_SECCOMP");
 	REQUIRE_FALSE(installed);
 	REQUIRE(bpftime::seccomp::go_seccomp_listener.load() == -2);
 }
 
 TEST_CASE("Worker construction failure cancels partially started seccomp setup")
 {
-	REQUIRE(setenv("BPFTIME_GO_SECCOMP", "1", 1) == 0);
+	unsetenv("BPFTIME_RUN_WITH_KERNEL");
 	bpftime::seccomp::go_seccomp_listener.store(-1);
 	worker_allocations_before_failure = 1;
 	const bool installed = bpftime::seccomp::install_seccomp_tracer();
 	worker_allocations_before_failure = -1;
-	unsetenv("BPFTIME_GO_SECCOMP");
 	REQUIRE_FALSE(installed);
 	REQUIRE(bpftime::seccomp::go_seccomp_listener.load() == -2);
 }
@@ -197,7 +195,7 @@ __wrap_syscall(long number, ...)
 
 TEST_CASE("Post-install logging failure preserves the live seccomp listener")
 {
-	REQUIRE(setenv("BPFTIME_GO_SECCOMP", "1", 1) == 0);
+	unsetenv("BPFTIME_RUN_WITH_KERNEL");
 	auto previous_logger = spdlog::default_logger();
 	auto sink = std::make_shared<spdlog::sinks::callback_sink_mt>(
 		[](const spdlog::details::log_msg &) { throw std::bad_alloc(); });
@@ -212,7 +210,6 @@ TEST_CASE("Post-install logging failure preserves the live seccomp listener")
 	const bool installed = bpftime::seccomp::install_seccomp_tracer();
 	allow_install = false;
 	spdlog::set_default_logger(previous_logger);
-	unsetenv("BPFTIME_GO_SECCOMP");
 	REQUIRE(installed);
 	REQUIRE(bpftime::seccomp::go_seccomp_listener.load() == 42);
 }
