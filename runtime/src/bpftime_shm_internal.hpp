@@ -37,8 +37,10 @@ namespace bpftime
 
 class shm_lifecycle_lock {
     public:
-	explicit shm_lifecycle_lock(const char *shm_name) noexcept;
+	explicit shm_lifecycle_lock(const char *shm_name,
+				    bool shared_non_blocking = false) noexcept;
 	~shm_lifecycle_lock();
+	bool owns_lock() const noexcept { return lock_fd >= 0; }
 
 	shm_lifecycle_lock(const shm_lifecycle_lock &) = delete;
 	shm_lifecycle_lock &operator=(const shm_lifecycle_lock &) = delete;
