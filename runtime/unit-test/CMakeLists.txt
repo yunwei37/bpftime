@@ -64,6 +64,8 @@ set(TEST_SOURCES
     test_attach_failures.cpp
     test_memfd_create.cpp
     test_robust_shm_mutex.cpp
+    maps/test_ringbuf_reserve.cpp
+    maps/test_map_lock_dead_owner.cpp
 
     attach_with_ebpf/test_attach_uprobe_with_ebpf_trap.cpp
     attach_with_ebpf/test_helpers.cpp
