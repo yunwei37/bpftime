@@ -103,6 +103,36 @@ class robust_shm_mutex {
 		return true;
 	}
 
+	// Non-blocking counterpart of lock() for BPF helper hot paths.
+	// Contention reports EBUSY so callers skip the event instead of
+	// waiting; a dead holder is handled exactly as in lock().
+	bool try_lock_and_recover(const char *label = nullptr)
+	{
+		int rc = pthread_mutex_trylock(&mutex);
+#ifdef __linux__
+		if (rc == EOWNERDEAD) {
+			try {
+				SPDLOG_ERROR(
+					"SHM robust mutex (guard '{}') owner died (EOWNERDEAD) on trylock; latching ENOTRECOVERABLE, future lockers fail with EBUSY",
+					label ? label : "unlabeled");
+			} catch (...) {
+			}
+			pthread_mutex_unlock(&mutex);
+			errno = EBUSY;
+			return false;
+		}
+		if (rc == ENOTRECOVERABLE) {
+			errno = EBUSY;
+			return false;
+		}
+#endif
+		if (rc != 0) {
+			errno = rc;
+			return false;
+		}
+		return true;
+	}
+
 	void unlock() { pthread_mutex_unlock(&mutex); }
 };
 
@@ -123,6 +153,26 @@ class robust_shm_lock_guard {
 	bool owns_lock() const { return mutex != nullptr; }
 	robust_shm_lock_guard(const robust_shm_lock_guard &) = delete;
 	robust_shm_lock_guard &operator=(const robust_shm_lock_guard &) = delete;
+};
+
+class robust_shm_trylock_guard {
+	robust_shm_mutex *mutex;
+
+    public:
+	explicit robust_shm_trylock_guard(robust_shm_mutex &m,
+					  const char *label = nullptr)
+		: mutex(m.try_lock_and_recover(label) ? &m : nullptr)
+	{
+	}
+	~robust_shm_trylock_guard()
+	{
+		if (mutex)
+			mutex->unlock();
+	}
+	bool owns_lock() const { return mutex != nullptr; }
+	robust_shm_trylock_guard(const robust_shm_trylock_guard &) = delete;
+	robust_shm_trylock_guard &
+	operator=(const robust_shm_trylock_guard &) = delete;
 };
 
 } // namespace bpftime
