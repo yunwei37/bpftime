@@ -26,14 +26,28 @@
 #if __linux__
 
 // syscall() function was hooked by syscall server, direct call to it will lead
-// to a result provided by bpftime. So if we want to get things from kernel, we
-// must manually execute `syscall` from libc
-static void *libc_handle = dlopen(LIBC_SO, RTLD_LAZY);
-static auto libc_syscall =
-	reinterpret_cast<decltype(&::syscall)>(dlsym(libc_handle, "syscall"));
+// to a result provided by bpftime. Resolve libc's `syscall` lazily so DSO load
+// does not run dlopen/dlsym in filtered-out preloaded processes.
+static decltype(&::syscall) resolve_libc_syscall()
+{
+	static auto fn = []() -> decltype(&::syscall) {
+		void *handle = dlopen(LIBC_SO, RTLD_LAZY | RTLD_NOLOAD);
+		if (!handle)
+			handle = dlopen(LIBC_SO, RTLD_LAZY);
+		return handle ? reinterpret_cast<decltype(&::syscall)>(
+					dlsym(handle, "syscall"))
+			      : nullptr;
+	}();
+	return fn;
+}
 
 static int my_bpf_obj_get_info_by_fd(int bpf_fd, void *info, __u32 *info_len)
 {
+	auto libc_syscall = resolve_libc_syscall();
+	if (!libc_syscall) {
+		errno = ENOSYS;
+		return -1;
+	}
 	const size_t attr_sz = offsetofend(union bpf_attr, info);
 	union bpf_attr attr;
 	int err;
@@ -52,6 +66,11 @@ static int my_bpf_obj_get_info_by_fd(int bpf_fd, void *info, __u32 *info_len)
 __attribute__((__noinline__, noinline)) static long
 my_bpf_syscall_fd(long cmd, union bpf_attr *attr, unsigned long size)
 {
+	auto libc_syscall = resolve_libc_syscall();
+	if (!libc_syscall) {
+		errno = ENOSYS;
+		return -1;
+	}
 	int attempts = 5;
 	long fd;
 	do {
