@@ -223,8 +223,15 @@ void *get_module_base_addr(const char *module_name)
 		exec_storage = get_executable_path();
 		module_name = exec_storage.c_str();
 	}
-#endif
 	gum_module_load(module_name, nullptr);
+#else
+	// On Linux gum_module_load() is backed by dlopen(). Calling it here
+	// would force-map a target module into every unrelated LD_PRELOADed
+	// process that scans the same SHM handlers (e.g. uname/gzip pulling
+	// in a PyTorch DSO). gum_module_find_base_address() only reports
+	// modules already present in /proc/self/maps, which is the intended
+	// semantics for a process where the module is simply not loaded.
+#endif
 	return (void *)gum_module_find_base_address(module_name);
 }
 
