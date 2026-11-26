@@ -4,15 +4,19 @@
 #include <boost/interprocess/interprocess_fwd.hpp>
 #include <bpf_map/userspace/per_cpu_hash_map.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <cerrno>
+#include <chrono>
 #include <cstdint>
-#include <sched.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #include <vector>
 #include <bpf_map/map_common_def.hpp>
+#include "handler/map_handler.hpp"
 #include "catch2/internal/catch_run_context.hpp"
 #include <algorithm>
+#include <atomic>
 #include <random>
+#include <thread>
 
 using namespace boost::interprocess;
 using namespace bpftime;
@@ -132,4 +136,153 @@ TEST_CASE("Per-CPU hash helper flags preserve conditional update semantics",
 	REQUIRE(map.elem_delete(&key) == -1);
 	REQUIRE(errno == ENOENT);
 	REQUIRE(map.elem_update(&missing, &replacement, 1) == 0);
+}
+
+TEST_CASE("Per-CPU hash map handler serializes concurrent helper and userspace access",
+	  "[maps][percpu_hash][concurrency]")
+{
+	static constexpr const char *CONC_SHM = "BPFTIME_PER_CPU_HASH_CONC_SHM";
+	shm_remove remover(CONC_SHM);
+	managed_shared_memory segment(create_only, CONC_SHM, 4 << 20);
+	bpf_map_handler map_hd(1, (int)bpf_map_type::BPF_MAP_TYPE_PERCPU_HASH,
+			       sizeof(uint32_t), sizeof(uint64_t), 128, 0,
+			       "pcpu_conc", segment);
+	REQUIRE(map_hd.map_init(segment) == 0);
+
+	const long ncpu = std::max<long>(1, sysconf(_SC_NPROCESSORS_ONLN));
+	std::atomic<int> failures{ 0 };
+	std::vector<std::thread> workers;
+	for (int t = 0; t < 4; t++) {
+		workers.emplace_back([&map_hd, t, ncpu, &failures] {
+			const uint64_t expected_user = uint64_t(t + 1);
+			std::vector<uint64_t> user_vals(size_t(ncpu),
+							expected_user);
+			for (uint32_t iter = 0; iter < 300; iter++) {
+				// Disjoint per-thread keys exercise concurrent
+				// shared-table mutation and key_template reuse.
+				uint32_t k = uint32_t(t * 32) + (iter % 16);
+				uint64_t v = (uint64_t(t + 1) << 32) | iter;
+				if ((iter & 1U) == 0U) {
+					// Helper path: trylock, so EBUSY is a
+					// counted skip, never a failure.
+					long rc = map_hd.map_update_elem(
+						&k, &v, 0, false);
+					if (rc != 0) {
+						REQUIRE(errno == EBUSY);
+						continue;
+					}
+					errno = 0;
+					const void *helper_val =
+						map_hd.map_lookup_elem(&k,
+								       false);
+					if (helper_val == nullptr)
+						REQUIRE(errno == EBUSY);
+					// The fd-based syscall path blocks and
+					// must always observe the stored slot.
+					const auto *slots = static_cast<
+						const uint64_t *>(
+						map_hd.map_lookup_elem(&k,
+								       true));
+					if (slots == nullptr ||
+					    std::find(slots, slots + ncpu, v) ==
+						    slots + ncpu)
+						failures.fetch_add(1);
+				} else {
+					// Syscall path keeps the blocking
+					// lock and must not be skipped.
+					if (map_hd.map_update_elem(
+						    &k, user_vals.data(), 0,
+						    true) != 0)
+						failures.fetch_add(1);
+					errno = 0;
+					const auto *hval = static_cast<
+						const uint64_t *>(
+						map_hd.map_lookup_elem(&k,
+								       false));
+					if (hval == nullptr) {
+						REQUIRE(errno == EBUSY);
+					} else if (*hval != expected_user) {
+						failures.fetch_add(1);
+					}
+					const auto *slots = static_cast<
+						const uint64_t *>(
+						map_hd.map_lookup_elem(&k,
+								       true));
+					if (slots == nullptr ||
+					    slots[0] != expected_user ||
+					    slots[ncpu - 1] != expected_user)
+						failures.fetch_add(1);
+				}
+				uint32_t next = 0;
+				(void)map_hd.bpf_map_get_next_key(nullptr,
+								  &next, true);
+				if ((iter & 3U) == 3U &&
+				    map_hd.map_delete_elem(&k, true) != 0)
+					failures.fetch_add(1);
+			}
+		});
+	}
+	for (auto &w : workers)
+		w.join();
+	REQUIRE(failures.load() == 0);
+	map_hd.map_free(segment);
+}
+
+TEST_CASE("Per-CPU hash helper trylock skips and counts held-lock events",
+	  "[maps][percpu_hash][concurrency]")
+{
+	static constexpr const char *TRYLOCK_SHM =
+		"BPFTIME_PER_CPU_HASH_TRYLOCK_SHM";
+	shm_remove remover(TRYLOCK_SHM);
+	managed_shared_memory segment(create_only, TRYLOCK_SHM, 4 << 20);
+	bpf_map_handler map_hd(2, (int)bpf_map_type::BPF_MAP_TYPE_PERCPU_HASH,
+			       sizeof(uint32_t), sizeof(uint64_t), 128, 0,
+			       "pcpu_trylock", segment);
+	REQUIRE(map_hd.map_init(segment) == 0);
+
+	const long ncpu = std::max<long>(1, sysconf(_SC_NPROCESSORS_ONLN));
+	uint32_t key = 7;
+	std::vector<uint64_t> user_vals(size_t(ncpu), 1);
+	REQUIRE(map_hd.map_update_elem(&key, user_vals.data(), 0, true) == 0);
+
+	const uint64_t skips_before = get_percpu_map_trylock_skip_count();
+	std::atomic<bool> held{ false };
+	std::thread holder([&] {
+		REQUIRE(map_hd.get_map_lock().lock("trylock-test"));
+		held.store(true, std::memory_order_release);
+		std::this_thread::sleep_for(std::chrono::milliseconds(60));
+		map_hd.get_map_lock().unlock();
+	});
+	while (!held.load(std::memory_order_acquire))
+		std::this_thread::yield();
+
+	// Helper calls never wait: they fail with EBUSY immediately and bump
+	// the process-local contention-skip counter.
+	errno = 0;
+	uint64_t helper_val = 99;
+	REQUIRE(map_hd.map_update_elem(&key, &helper_val, 0, false) == -1);
+	REQUIRE(errno == EBUSY);
+	errno = 0;
+	REQUIRE(map_hd.map_lookup_elem(&key, false) == nullptr);
+	REQUIRE(errno == EBUSY);
+	REQUIRE(get_percpu_map_trylock_skip_count() >= skips_before + 2);
+
+	// Syscall calls keep blocking until the holder releases.
+	std::atomic<bool> syscall_done{ false };
+	std::thread syscaller([&] {
+		REQUIRE(map_hd.map_update_elem(&key, user_vals.data(), 0,
+					       true) == 0);
+		syscall_done.store(true, std::memory_order_release);
+	});
+	std::this_thread::sleep_for(std::chrono::milliseconds(20));
+	REQUIRE(!syscall_done.load(std::memory_order_acquire));
+	holder.join();
+	syscaller.join();
+	REQUIRE(syscall_done.load(std::memory_order_acquire));
+
+	// After release the helper path acquires the trylock again.
+	errno = 0;
+	REQUIRE(map_hd.map_update_elem(&key, &helper_val, 0, false) == 0);
+	REQUIRE(map_hd.map_lookup_elem(&key, false) != nullptr);
+	map_hd.map_free(segment);
 }
