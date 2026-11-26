@@ -14,6 +14,7 @@
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <cstring>
 #include <linux/bpf.h>
 #include <sys/mman.h>
@@ -511,5 +512,89 @@ TEST_CASE("ringbuf eventfd: commit before wakeup keeps parked consumer live",
 		REQUIRE(consumed.load(std::memory_order_acquire) == kBursts);
 		f.drain_all();
 	}
+}
+
+TEST_CASE("ringbuf eventfd exit helper", "[.ringbuf-eventfd-exit-helper]")
+{
+	const char *fd_env = getenv("BPFTIME_TEST_EXIT_RB_FD");
+	REQUIRE(fd_env != nullptr);
+	static int s_rb_fd = -1;
+	s_rb_fd = std::atoi(fd_env);
+	REQUIRE(s_rb_fd >= 0);
+
+	bpftime_initialize_global_shm(bpftime::shm_open_type::SHM_OPEN_ONLY);
+	REQUIRE(std::atexit([]() {
+			void *slot = bpftime_ringbuf_reserve(s_rb_fd,
+							     sizeof(uint64_t));
+			if (!slot)
+				_exit(21);
+			int saved = bpftime_protect_open_write_window();
+			*static_cast<uint64_t *>(slot) = 0xdeadbeefULL;
+			bpftime_protect_restore(saved);
+			bpftime_ringbuf_submit_with_flags(
+				s_rb_fd, slot, false, BPF_RB_FORCE_WAKEUP);
+		}) == 0);
+
+	std::array<std::thread, 8> workers;
+	for (auto &w : workers) {
+		w = std::thread([rb_fd = s_rb_fd]() {
+			for (int i = 0; i < 16; ++i) {
+				void *slot = bpftime_ringbuf_reserve(
+					rb_fd, sizeof(uint64_t));
+				if (!slot)
+					_exit(22);
+				int saved = bpftime_protect_open_write_window();
+				*static_cast<uint64_t *>(slot) =
+					static_cast<uint64_t>(i);
+				bpftime_protect_restore(saved);
+				bpftime_ringbuf_submit_with_flags(
+					rb_fd, slot, false,
+					BPF_RB_FORCE_WAKEUP);
+			}
+		});
+	}
+	for (auto &w : workers)
+		w.join();
+	std::exit(0);
+}
+
+TEST_CASE("ringbuf eventfd: multithreaded and exit-time submit stay valid",
+	  "[epoll][ringbuf-eventfd]")
+{
+	eventfd_test_fixture f;
+	const std::string fd_str = std::to_string(f.rb_fd);
+
+	pid_t pid = fork();
+	REQUIRE(pid >= 0);
+	if (pid == 0) {
+		setenv("BPFTIME_TEST_EXIT_RB_FD", fd_str.c_str(), 1);
+		execl("/proc/self/exe", "bpftime_runtime_tests",
+		      "[.ringbuf-eventfd-exit-helper]", nullptr);
+		_exit(127);
+	}
+
+	int status = 0;
+	REQUIRE(waitpid(pid, &status, 0) == pid);
+	REQUIRE(WIFEXITED(status));
+	REQUIRE(WEXITSTATUS(status) == 0);
+
+	int creator_efd = bpftime_ringbuf_creator_eventfd(f.rb_fd);
+	REQUIRE(creator_efd >= 0);
+	uint64_t wake_count = 0;
+	REQUIRE(read(creator_efd, &wake_count, sizeof(wake_count)) ==
+		static_cast<ssize_t>(sizeof(wake_count)));
+	REQUIRE(wake_count == 8 * 16 + 1);
+
+	int total = 0;
+	int batch = 0;
+	do {
+		batch = bpftime_poll_from_ringbuf(
+			f.rb_fd, &total, [](void *ctx, void *, size_t) {
+				++*static_cast<int *>(ctx);
+				return 0;
+			});
+		REQUIRE(batch >= 0);
+	} while (batch > 0);
+	REQUIRE(total == 8 * 16 + 1);
 }
 #endif
