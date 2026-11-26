@@ -949,11 +949,10 @@ uint64_t bpf_ringbuf_discard(uint64_t data, uint64_t flags, uint64_t, uint64_t,
 {
 	int32_t *ptr = (int32_t *)(uintptr_t)data;
 	int fd = ptr[-1];
-	if (flags != 0) {
-		SPDLOG_WARN(
-			"Currently only supports ringbuf_submit with flags=0");
-	}
-	bpftime_ringbuf_submit(fd, (void *)(uintptr_t)data, true);
+	if (flags & ~(BPF_RB_NO_WAKEUP | BPF_RB_FORCE_WAKEUP))
+		return (uint64_t)-EINVAL;
+	bpftime_ringbuf_submit_with_flags(fd, (void *)(uintptr_t)data, true,
+					  flags);
 	return 0;
 }
 
