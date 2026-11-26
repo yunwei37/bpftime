@@ -58,7 +58,7 @@ namespace {
 #endif
 
 // Stable per-thread slot for the syscall map-in-map inner fd. The 4-byte value
-// is copied here while map_lock is held, so the caller's subsequent memcpy
+// is copied here while the shared map lock is held, so the caller's subsequent memcpy
 // cannot read a hash node freed by a concurrent delete.
 thread_local int tl_map_in_map_fd_snapshot;
 
@@ -78,7 +78,7 @@ constexpr bool is_map_in_map_v =
 	std::is_same_v<T, array_map_of_maps_impl> ||
 	std::is_same_v<T, hash_map_of_maps_impl>;
 
-// Run fn while holding map_lock when the map impl requests locking; run it
+// Run fn while holding the shared map lock when the map impl requests locking; run it
 // directly otherwise. Every map impl declares should_lock, so this preserves
 // the exact locking of the previous per-operation dispatch.
 template <typename Fn>
@@ -237,14 +237,14 @@ const void *bpf_map_handler::map_lookup_elem(const void *key,
 				// LRU enforces BPF_F_RDONLY/WRONLY only on
 				// syscall access; helpers pass false.
 				return with_optional_lock(
-					impl->should_lock, map_lock,
+					impl->should_lock, get_map_lock(),
 					[&]() -> const void * {
 						return impl->elem_lookup(
 							key, from_syscall);
 					});
 			} else if constexpr (is_percpu_map_v<impl_t>) {
 				return with_optional_lock(
-					impl->should_lock, map_lock,
+					impl->should_lock, get_map_lock(),
 					[&]() -> const void * {
 						if (from_syscall)
 							return impl->elem_lookup_userspace(
@@ -254,17 +254,17 @@ const void *bpf_map_handler::map_lookup_elem(const void *key,
 			} else if constexpr (is_map_in_map_v<impl_t>) {
 				if (!from_syscall)
 					return with_optional_lock(
-						impl->should_lock, map_lock,
+						impl->should_lock, get_map_lock(),
 						[&]() -> const void * {
 							return impl->elem_lookup(
 								key);
 						});
 				// Syscall path locks unconditionally (ignoring
 				// should_lock) and copies the 4-byte inner fd
-				// to thread-local storage while map_lock is
+				// to thread-local storage while the shared map lock is
 				// held, so the caller's memcpy cannot touch a
 				// concurrently freed hash node.
-				robust_shm_lock_guard guard(map_lock,
+				robust_shm_lock_guard guard(get_map_lock(),
 							    name.c_str());
 				if (!guard.owns_lock())
 					return nullptr;
@@ -276,7 +276,7 @@ const void *bpf_map_handler::map_lookup_elem(const void *key,
 				return &tl_map_in_map_fd_snapshot;
 			}
 			return with_optional_lock(
-				impl->should_lock, map_lock,
+				impl->should_lock, get_map_lock(),
 				[&]() -> const void * {
 					return impl->elem_lookup(key);
 				});
@@ -306,7 +306,7 @@ long bpf_map_handler::map_update_elem(const void *key, const void *value,
 					return -EINVAL;
 			}
 			return with_optional_lock(
-				impl->should_lock, map_lock,
+				impl->should_lock, get_map_lock(),
 				[&]() -> long {
 					// LRU enforces BPF_F_RDONLY only on
 					// syscall access; helpers pass false.
@@ -369,7 +369,7 @@ int bpf_map_handler::bpf_map_get_next_key(const void *key, void *next_key,
 		[&](auto *impl) -> int {
 			using impl_t = std::remove_cvref_t<decltype(*impl)>;
 			return with_optional_lock(
-				impl->should_lock, map_lock,
+				impl->should_lock, get_map_lock(),
 				[&]() -> int {
 					// LRU enforces BPF_F_WRONLY only on
 					// syscall access; helpers pass false.
@@ -409,7 +409,7 @@ long bpf_map_handler::map_delete_elem(const void *key, bool from_syscall) const
 					return -EINVAL;
 			}
 			return with_optional_lock(
-				impl->should_lock, map_lock,
+				impl->should_lock, get_map_lock(),
 				[&]() -> long {
 					// LRU enforces BPF_F_RDONLY only on
 					// syscall access; helpers pass false.
@@ -461,15 +461,30 @@ int bpf_map_handler::map_init(managed_shared_memory &memory)
 		return 0;
 	}
 
-	const auto init_refcnt = [&]() {
-		if (map_refcnt_ptr.get() == nullptr) {
-			map_refcnt_ptr =
-				memory.construct<map_refcount_t>(
-					boost::interprocess::anonymous_instance)(
-					1);
-		} else {
-			map_refcnt_ptr->store(1, std::memory_order_relaxed);
+	const auto init_refcnt = [&]() -> int {
+		try {
+			if (map_refcnt_ptr.get() == nullptr) {
+				map_refcnt_ptr =
+					memory.construct<map_refcount_t>(
+						boost::interprocess::anonymous_instance)(
+						1);
+			} else {
+				map_refcnt_ptr->store(1, std::memory_order_relaxed);
+			}
+			if (map_lock_ptr.get() == nullptr) {
+				map_lock_ptr =
+					memory.construct<robust_shm_mutex>(
+						boost::interprocess::anonymous_instance)();
+			}
+		} catch (...) {
+			map_free(memory);
+			return -ENOMEM;
 		}
+		if (map_lock_ptr.get() == nullptr) {
+			map_free(memory);
+			return -ENOMEM;
+		}
+		return 0;
 	};
 
 	switch (type) {
@@ -477,15 +492,13 @@ int bpf_map_handler::map_init(managed_shared_memory &memory)
 		map_impl_ptr = memory.construct<hash_map_impl>(
 			boost::interprocess::anonymous_instance)(
 			memory, max_entries, key_size, value_size);
-		init_refcnt();
-		return 0;
+		return init_refcnt();
 	}
 	case bpf_map_type::BPF_MAP_TYPE_ARRAY: {
 		map_impl_ptr = memory.construct<array_map_impl>(
 			boost::interprocess::anonymous_instance)(
 			memory, value_size, max_entries);
-		init_refcnt();
-		return 0;
+		return init_refcnt();
 	}
 	case bpf_map_type::BPF_MAP_TYPE_RINGBUF: {
 		auto max_ent = max_entries;
@@ -503,43 +516,37 @@ int bpf_map_handler::map_init(managed_shared_memory &memory)
 		map_impl_ptr = memory.construct<ringbuf_map_impl>(
 			boost::interprocess::anonymous_instance)(max_entries,
 								 memory);
-		init_refcnt();
-		return 0;
+		return init_refcnt();
 	}
 	case bpf_map_type::BPF_MAP_TYPE_PERF_EVENT_ARRAY: {
 		map_impl_ptr = memory.construct<perf_event_array_map_impl>(
 			boost::interprocess::anonymous_instance)(
 			memory, key_size, value_size, max_entries);
-		init_refcnt();
-		return 0;
+		return init_refcnt();
 	}
 	case bpf_map_type::BPF_MAP_TYPE_PERCPU_ARRAY: {
 		map_impl_ptr = memory.construct<per_cpu_array_map_impl>(
 			boost::interprocess::anonymous_instance)(
 			memory, value_size, max_entries);
-		init_refcnt();
-		return 0;
+		return init_refcnt();
 	}
 	case bpf_map_type::BPF_MAP_TYPE_PERCPU_HASH: {
 		map_impl_ptr = memory.construct<per_cpu_hash_map_impl>(
 			boost::interprocess::anonymous_instance)(
 			memory, key_size, value_size, max_entries);
-		init_refcnt();
-		return 0;
+		return init_refcnt();
 	}
 	case bpf_map_type::BPF_MAP_TYPE_QUEUE: {
 		map_impl_ptr = memory.construct<queue_map_impl>(
 			boost::interprocess::anonymous_instance)(
 			memory, value_size, max_entries);
-		init_refcnt();
-		return 0;
+		return init_refcnt();
 	}
 	case bpf_map_type::BPF_MAP_TYPE_STACK: {
 		map_impl_ptr = memory.construct<stack_map_impl>(
 			boost::interprocess::anonymous_instance)(
 			memory, value_size, max_entries);
-		init_refcnt();
-		return 0;
+		return init_refcnt();
 	}
 	case bpf_map_type::BPF_MAP_TYPE_BLOOM_FILTER: {
 		// For bloom filters, key_size must be 0
@@ -563,8 +570,7 @@ int bpf_map_handler::map_init(managed_shared_memory &memory)
 		map_impl_ptr = memory.construct<bloom_filter_map_impl>(
 			boost::interprocess::anonymous_instance)(
 			memory, value_size, max_entries, nr_hashes, hash_algo);
-		init_refcnt();
-		return 0;
+		return init_refcnt();
 	}
 
 #ifdef BPFTIME_BUILD_WITH_LIBBPF
@@ -573,23 +579,20 @@ int bpf_map_handler::map_init(managed_shared_memory &memory)
 			boost::interprocess::anonymous_instance)(
 			memory, attr.kernel_bpf_map_id, value_size,
 			max_entries);
-		init_refcnt();
-		return 0;
+		return init_refcnt();
 	}
 	case bpf_map_type::BPF_MAP_TYPE_KERNEL_USER_HASH: {
 		map_impl_ptr = memory.construct<hash_map_kernel_user_impl>(
 			boost::interprocess::anonymous_instance)(
 			memory, attr.kernel_bpf_map_id);
-		init_refcnt();
-		return 0;
+		return init_refcnt();
 	}
 	case bpf_map_type::BPF_MAP_TYPE_KERNEL_USER_PERCPU_ARRAY: {
 		map_impl_ptr =
 			memory.construct<percpu_array_map_kernel_user_impl>(
 				boost::interprocess::anonymous_instance)(
 				memory, attr.kernel_bpf_map_id);
-		init_refcnt();
-		return 0;
+		return init_refcnt();
 	}
 	case bpf_map_type::BPF_MAP_TYPE_KERNEL_USER_PERF_EVENT_ARRAY: {
 		map_impl_ptr =
@@ -597,22 +600,19 @@ int bpf_map_handler::map_init(managed_shared_memory &memory)
 				boost::interprocess::anonymous_instance)(
 				memory, 4, 4, sysconf(_SC_NPROCESSORS_ONLN),
 				attr.kernel_bpf_map_id);
-		init_refcnt();
-		return 0;
+		return init_refcnt();
 	}
 	case bpf_map_type::BPF_MAP_TYPE_PROG_ARRAY: {
 		map_impl_ptr = memory.construct<prog_array_map_impl>(
 			boost::interprocess::anonymous_instance)(
 			memory, key_size, value_size, max_entries);
-		init_refcnt();
-		return 0;
+		return init_refcnt();
 	}
 	case bpf_map_type::BPF_MAP_TYPE_STACK_TRACE: {
 		map_impl_ptr = memory.construct<stack_trace_map_impl>(
 			boost::interprocess::anonymous_instance)(
 			memory, key_size, value_size, max_entries);
-		init_refcnt();
-		return 0;
+		return init_refcnt();
 	}
 #endif
 	case bpf_map_type::BPF_MAP_TYPE_ARRAY_OF_MAPS: {
@@ -623,8 +623,7 @@ int bpf_map_handler::map_init(managed_shared_memory &memory)
 		map_impl_ptr = memory.construct<array_map_of_maps_impl>(
 			boost::interprocess::anonymous_instance)(memory,
 								 max_entries);
-		init_refcnt();
-		return 0;
+		return init_refcnt();
 	}
 	case bpf_map_type::BPF_MAP_TYPE_HASH_OF_MAPS: {
 		if (value_size != sizeof(uint32_t))
@@ -633,16 +632,14 @@ int bpf_map_handler::map_init(managed_shared_memory &memory)
 			boost::interprocess::anonymous_instance)(
 			memory, key_size, max_entries,
 			static_cast<uint32_t>(flags));
-		init_refcnt();
-		return 0;
+		return init_refcnt();
 	}
 	case bpf_map_type::BPF_MAP_TYPE_LRU_HASH: {
 		map_impl_ptr = memory.construct<lru_var_hash_map_impl>(
 			boost::interprocess::anonymous_instance)(
 			memory, key_size, value_size, max_entries,
 			static_cast<uint32_t>(flags));
-		init_refcnt();
-		return 0;
+		return init_refcnt();
 	}
 
 	// TODO: Move these CUDA sentences to a more appropriate position
@@ -668,9 +665,9 @@ int bpf_map_handler::map_init(managed_shared_memory &memory)
 		map_impl_ptr = memory.construct<nv_gpu_shared_hash_map_impl>(
 			boost::interprocess::anonymous_instance)(
 			memory, max_entries, key_size, value_size);
-		init_refcnt();
+		const int ret = init_refcnt();
 		shm_holder.global_shared_memory.set_enable_mock(true);
-		return 0;
+		return ret;
 	}
 	case bpf_map_type::BPF_MAP_TYPE_PERGPUTD_ARRAY_MAP: {
 		shm_holder.global_shared_memory.set_enable_mock(false);
@@ -696,9 +693,9 @@ int bpf_map_handler::map_init(managed_shared_memory &memory)
 			memory.construct<nv_gpu_per_thread_array_map_impl>(
 				boost::interprocess::anonymous_instance)(
 				memory, value_size, max_entries, thread_count);
-		init_refcnt();
+		const int ret = init_refcnt();
 		shm_holder.global_shared_memory.set_enable_mock(true);
-		return 0;
+		return ret;
 	}
 	case bpf_map_type::BPF_MAP_TYPE_GPU_ARRAY_MAP: {
 		shm_holder.global_shared_memory.set_enable_mock(false);
@@ -719,9 +716,9 @@ int bpf_map_handler::map_init(managed_shared_memory &memory)
 		map_impl_ptr = memory.construct<nv_gpu_shared_array_map_impl>(
 			boost::interprocess::anonymous_instance)(
 			memory, value_size, max_entries);
-		init_refcnt();
+		const int ret = init_refcnt();
 		shm_holder.global_shared_memory.set_enable_mock(true);
-		return 0;
+		return ret;
 	}
 	case bpf_map_type::BPF_MAP_TYPE_GPU_KERNEL_SHARED_ARRAY_MAP: {
 		shm_holder.global_shared_memory.set_enable_mock(false);
@@ -742,9 +739,9 @@ int bpf_map_handler::map_init(managed_shared_memory &memory)
 			boost::interprocess::anonymous_instance)(
 			memory, attr.kernel_bpf_map_id, value_size,
 			max_entries);
-		init_refcnt();
+		const int ret = init_refcnt();
 		shm_holder.global_shared_memory.set_enable_mock(true);
-		return 0;
+		return ret;
 	}
 	case bpf_map_type::BPF_MAP_TYPE_GPU_RINGBUF_MAP: {
 		shm_holder.global_shared_memory.set_enable_mock(false);
@@ -789,9 +786,9 @@ int bpf_map_handler::map_init(managed_shared_memory &memory)
 				"Clamped GPU ringbuf thread count from {} to {} due to shared memory pressure; override via BPFTIME_MAP_GPU_THREAD_COUNT",
 				requested_thread_count, thread_count);
 		}
-		init_refcnt();
+		const int ret = init_refcnt();
 		shm_holder.global_shared_memory.set_enable_mock(true);
-		return 0;
+		return ret;
 	}
 	// HOST versions: use boost::interprocess + cudaHostRegister (for Tegra)
 	case bpf_map_type::BPF_MAP_TYPE_PERGPUTD_ARRAY_HOST_MAP: {
@@ -801,8 +798,7 @@ int bpf_map_handler::map_init(managed_shared_memory &memory)
 		map_impl_ptr = memory.construct<nv_gpu_array_host_map_impl>(
 			boost::interprocess::anonymous_instance)(
 			memory, value_size, max_entries, attr.gpu_thread_count);
-		init_refcnt();
-		return 0;
+		return init_refcnt();
 	}
 	case bpf_map_type::BPF_MAP_TYPE_GPU_ARRAY_HOST_MAP: {
 		SPDLOG_INFO(
@@ -812,16 +808,14 @@ int bpf_map_handler::map_init(managed_shared_memory &memory)
 			memory.construct<nv_gpu_shared_array_host_map_impl>(
 				boost::interprocess::anonymous_instance)(
 				memory, value_size, max_entries);
-		init_refcnt();
-		return 0;
+		return init_refcnt();
 	}
 #endif
 	case bpf_map_type::BPF_MAP_TYPE_LPM_TRIE: {
 		map_impl_ptr = memory.construct<lpm_trie_map_impl>(
 			boost::interprocess::anonymous_instance)(
 			memory, key_size, value_size, max_entries);
-		init_refcnt();
-		return 0;
+		return init_refcnt();
 	}
 	default:
 		if (bpftime_get_runtime_config().allow_non_buildin_map_types) {
@@ -855,10 +849,15 @@ void bpf_map_handler::map_free(managed_shared_memory &memory) const
 		if (prev > 1) {
 			map_impl_ptr = nullptr;
 			map_refcnt_ptr = nullptr;
+			map_lock_ptr = nullptr;
 			return;
 		}
 		memory.destroy_ptr(map_refcnt_ptr.get());
 		map_refcnt_ptr = nullptr;
+		if (map_lock_ptr.get() != nullptr) {
+			memory.destroy_ptr(map_lock_ptr.get());
+			map_lock_ptr = nullptr;
+		}
 	}
 
 	auto run_default_free = [&]() {
@@ -877,6 +876,7 @@ void bpf_map_handler::map_free(managed_shared_memory &memory) const
 		run_default_free();
 		map_impl_ptr = nullptr;
 		map_refcnt_ptr = nullptr;
+		map_lock_ptr = nullptr;
 		return;
 	}
 #endif
@@ -886,6 +886,7 @@ void bpf_map_handler::map_free(managed_shared_memory &memory) const
 		run_default_free);
 	map_impl_ptr = nullptr;
 	map_refcnt_ptr = nullptr;
+	map_lock_ptr = nullptr;
 }
 std::optional<stack_trace_map_impl *>
 bpf_map_handler::try_get_stack_trace_map_impl() const
@@ -1011,21 +1012,21 @@ long bpf_map_handler::map_push_elem(const void *value, uint64_t flags,
 		auto impl =
 			static_cast<queue_map_impl *>(map_impl_ptr.get());
 		return with_optional_lock(
-			impl->should_lock, map_lock,
+			impl->should_lock, get_map_lock(),
 			[&] { return impl->map_push_elem(value, flags); });
 	}
 	case bpf_map_type::BPF_MAP_TYPE_STACK: {
 		auto impl =
 			static_cast<stack_map_impl *>(map_impl_ptr.get());
 		return with_optional_lock(
-			impl->should_lock, map_lock,
+			impl->should_lock, get_map_lock(),
 			[&] { return impl->map_push_elem(value, flags); });
 	}
 	case bpf_map_type::BPF_MAP_TYPE_BLOOM_FILTER: {
 		auto impl = static_cast<bloom_filter_map_impl *>(
 			map_impl_ptr.get());
 		return with_optional_lock(
-			impl->should_lock, map_lock,
+			impl->should_lock, get_map_lock(),
 			[&] { return impl->map_push_elem(value, flags); });
 	}
 	default:
@@ -1043,14 +1044,14 @@ long bpf_map_handler::map_pop_elem(void *value, bool from_syscall) const
 		auto impl =
 			static_cast<queue_map_impl *>(map_impl_ptr.get());
 		return with_optional_lock(
-			impl->should_lock, map_lock,
+			impl->should_lock, get_map_lock(),
 			[&] { return impl->map_pop_elem(value); });
 	}
 	case bpf_map_type::BPF_MAP_TYPE_STACK: {
 		auto impl =
 			static_cast<stack_map_impl *>(map_impl_ptr.get());
 		return with_optional_lock(
-			impl->should_lock, map_lock,
+			impl->should_lock, get_map_lock(),
 			[&] { return impl->map_pop_elem(value); });
 	}
 	default:
@@ -1073,7 +1074,7 @@ long bpf_map_handler::map_lookup_and_delete_elem(const void *key, void *value,
 		auto impl =
 			static_cast<hash_map_impl *>(map_impl_ptr.get());
 		return with_optional_lock(
-			impl->should_lock, map_lock, [&] {
+			impl->should_lock, get_map_lock(), [&] {
 				return impl->lookup_and_delete(
 					key, value, from_syscall);
 			});
@@ -1082,7 +1083,7 @@ long bpf_map_handler::map_lookup_and_delete_elem(const void *key, void *value,
 		auto impl = static_cast<per_cpu_hash_map_impl *>(
 			map_impl_ptr.get());
 		return with_optional_lock(
-			impl->should_lock, map_lock, [&] {
+			impl->should_lock, get_map_lock(), [&] {
 				return impl->lookup_and_delete_userspace(
 					key, value);
 			});
@@ -1091,7 +1092,7 @@ long bpf_map_handler::map_lookup_and_delete_elem(const void *key, void *value,
 		auto impl = static_cast<lru_var_hash_map_impl *>(
 			map_impl_ptr.get());
 		return with_optional_lock(
-			impl->should_lock, map_lock, [&] {
+			impl->should_lock, get_map_lock(), [&] {
 				return impl->lookup_and_delete(
 					key, value, from_syscall);
 			});
@@ -1100,7 +1101,7 @@ long bpf_map_handler::map_lookup_and_delete_elem(const void *key, void *value,
 		auto impl = static_cast<stack_trace_map_impl *>(
 			map_impl_ptr.get());
 		return with_optional_lock(
-			impl->should_lock, map_lock, [&] {
+			impl->should_lock, get_map_lock(), [&] {
 				return impl->lookup_and_delete(
 					key, value, from_syscall);
 			});
@@ -1111,14 +1112,14 @@ long bpf_map_handler::map_lookup_and_delete_elem(const void *key, void *value,
 		// Queue and stack take the keyless pop, and both declare
 		// should_lock = true: the handler owns their lock.
 		return with_optional_lock(
-			impl->should_lock, map_lock,
+			impl->should_lock, get_map_lock(),
 			[&] { return impl->map_pop_elem(value); });
 	}
 	case bpf_map_type::BPF_MAP_TYPE_STACK: {
 		auto impl =
 			static_cast<stack_map_impl *>(map_impl_ptr.get());
 		return with_optional_lock(
-			impl->should_lock, map_lock,
+			impl->should_lock, get_map_lock(),
 			[&] { return impl->map_pop_elem(value); });
 	}
 	default:
@@ -1137,21 +1138,21 @@ long bpf_map_handler::map_peek_elem(void *value, bool from_syscall) const
 		auto impl =
 			static_cast<queue_map_impl *>(map_impl_ptr.get());
 		return with_optional_lock(
-			impl->should_lock, map_lock,
+			impl->should_lock, get_map_lock(),
 			[&] { return impl->map_peek_elem(value); });
 	}
 	case bpf_map_type::BPF_MAP_TYPE_STACK: {
 		auto impl =
 			static_cast<stack_map_impl *>(map_impl_ptr.get());
 		return with_optional_lock(
-			impl->should_lock, map_lock,
+			impl->should_lock, get_map_lock(),
 			[&] { return impl->map_peek_elem(value); });
 	}
 	case bpf_map_type::BPF_MAP_TYPE_BLOOM_FILTER: {
 		auto impl = static_cast<bloom_filter_map_impl *>(
 			map_impl_ptr.get());
 		return with_optional_lock(
-			impl->should_lock, map_lock,
+			impl->should_lock, get_map_lock(),
 			[&] { return impl->map_peek_elem(value); });
 	}
 	default:
