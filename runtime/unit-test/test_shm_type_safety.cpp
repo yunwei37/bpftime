@@ -236,7 +236,7 @@ TEST_CASE("Map helper catches SHM bad_alloc across JIT frame as -ENOMEM",
 		{ .code = 0x95, .dst_reg = 0, .src_reg = 0, .off = 0, .imm = 0 },
 	};
 	runtime_config cfg;
-	cfg.set_vm_name("ubpf");
+	cfg.set_vm_name(DEFAULT_VM_NAME);
 	bpftime_prog prog(insns, std::size(insns), "jit_oom_test",
 			  std::move(cfg));
 	REQUIRE(bpftime_helper_group::get_shm_maps_helper_group()
