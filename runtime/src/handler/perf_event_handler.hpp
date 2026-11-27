@@ -7,7 +7,6 @@
 #define _PERF_EVENT_HANDLER
 #include "spdlog/spdlog.h"
 #include <boost/interprocess/managed_shared_memory.hpp>
-#include <boost/interprocess/containers/list.hpp>
 #include <boost/interprocess/containers/string.hpp>
 #include <boost/interprocess/containers/vector.hpp>
 #include <cstddef>
@@ -80,7 +79,8 @@ struct software_perf_event_buffer {
 	bytes_vec mmap_buffer;
 	bytes_vec copy_buffer;
 
-	software_perf_event_buffer(int pagesize, segment_manager *manager);
+	software_perf_event_buffer(int pagesize, segment_manager *manager,
+				   bool allocate_header_page = true);
 	void *ensure_mmap_buffer(size_t buffer_size);
 	perf_event_mmap_page &get_header_ref();
 	const perf_event_mmap_page &get_header_ref_const() const;
@@ -106,18 +106,18 @@ struct software_perf_event_shard {
 	software_perf_event_buffer buffer;
 
 	software_perf_event_shard(
-		int pid, int64_t tid, uint64_t generation,
-		uint64_t buffer_generation, int pagesize,
-		software_perf_event_buffer::segment_manager *manager,
-		size_t buffer_size);
+		int pagesize,
+		software_perf_event_buffer::segment_manager *manager);
 };
+
+constexpr size_t software_perf_event_max_shards = 512;
 
 using software_perf_event_shard_allocator = boost::interprocess::allocator<
 	software_perf_event_shard,
 	boost::interprocess::managed_shared_memory::segment_manager>;
-using software_perf_event_shard_list =
-	boost::interprocess::list<software_perf_event_shard,
-				  software_perf_event_shard_allocator>;
+using software_perf_event_shard_table =
+	boost::interprocess::vector<software_perf_event_shard,
+				    software_perf_event_shard_allocator>;
 
 struct software_perf_event_data {
 	int cpu;
@@ -132,7 +132,8 @@ struct software_perf_event_data {
 	mutable robust_shm_mutex shard_lock;
 	uint64_t next_shard_generation = 1;
 	uint64_t drains_since_reclaim = 0;
-	software_perf_event_shard_list producer_shards;
+	uint32_t shard_high_water = 0;
+	software_perf_event_shard_table producer_shards;
 	software_perf_event_data(
 		int cpu, int64_t config, int32_t sample_type,
 		boost::interprocess::managed_shared_memory &memory);
@@ -142,6 +143,7 @@ struct software_perf_event_data {
 	const perf_event_mmap_page &get_header_ref_const() const;
 	int output_data(const void *buf, size_t size);
 	size_t mmap_size() const;
+	size_t active_shard_count() const noexcept;
 	bool has_data();
 
     private:
