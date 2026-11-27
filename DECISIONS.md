@@ -24,6 +24,11 @@ Newest first. Read before starting a change. A pull request that reverses an ent
   >
   > 修了吗? 代码是不是要显著减少? 这个 descision 也需要写进去避免再次弄乱
 
+- **2026-11-27: lockless `dlopen()` retry without `has_pending_uprobe` latch; shared SHM lifecycle lock + `dl_iterate_phdr` target check** (#1018, supersedes `#1016` and removes `has_pending_uprobe` from `#970`). Keep `agent.cpp`'s `detach_mutex` (`std::try_to_lock`) and `bpf_attach_ctx`'s `ctx_mutex` (`std::try_to_lock`), acquire non-blocking shared `shm_lifecycle_lock` (`LOCK_SH | LOCK_NB`) before checking `epoch_seq` and scanning shared `manager` handlers so `begin_new_session()` cannot free handlers concurrently, and check mapped targets via in-memory `dl_iterate_phdr` on Linux (`0` `/proc/self/maps` reads and `0` GLib allocations) rather than `gum_module_find_base_address()`. Removing `has_pending_uprobe` avoids permanently missing uprobe links registered in SHM after process startup when a DSO is loaded later via `dlopen()`.
+  > 1016可以精简一下
+  >
+  > 删掉 bpf_attach_ctx.hpp 的 has_pending_uprobe 闩锁
+
 - **2026-11-27: non-blocking `dlopen()` retry and `L3` lock callsites for unmapped uprobes** (#970). When a Frida uprobe target DSO is not mapped at startup (`-ENOENT`), `bpf_attach_ctx` sets an atomic `has_pending_uprobes` flag and retries pending uprobe links on outermost successful non-`RTLD_NOLOAD` host `dlopen()` calls in the initialized PID, clearing `has_pending_uprobes` once no unmapped uprobe links remain so steady-state `dlopen()` returns before taking any lock or opening any lock file. While `has_pending_uprobes` is set, the `dlopen()` path uses three non-blocking `L3` lock callsites: (1) `detach_mutex` (`std::try_to_lock`) to avoid racing session teardown; (2) shared `shm_lifecycle_lock` (`LOCK_SH | LOCK_NB`) so `dlopen()` never scans SHM across concurrent `syscall-server` segment recreation or final unlink; and (3) `ctx_mutex` (`std::try_to_lock`) to serialize `bpf_attach_ctx` state without blocking the host loader.
   > 测试过了 pytorch 的 cache allocatpr 能 work? 去测一下, 可以的话就这样 pr
   >
