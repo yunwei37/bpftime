@@ -24,7 +24,8 @@ namespace
 std::atomic<int> active_helpers;
 std::atomic<int> maximum_active_helpers;
 
-uint64_t overlap_helper(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t)
+uint64_t overlap_helper(uint64_t, uint64_t, uint64_t, uint64_t,
+			uint64_t) noexcept
 {
 	int active = active_helpers.fetch_add(1, std::memory_order_acq_rel) + 1;
 	int maximum = maximum_active_helpers.load(std::memory_order_relaxed);
