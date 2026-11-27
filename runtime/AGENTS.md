@@ -36,7 +36,11 @@ Safety Redlines and Host-process safety invariants are binding here.
   `fork()`.
 - Fail open: unavailable shared memory, a full ringbuf, or an
   `ENOTRECOVERABLE` mutex skips tracing without blocking, aborting, or
-  changing the host exit status.
+  changing the host exit status. Every BPF helper registered into
+  `bpftime_helper_info` or `ebpf_helper_register_callback` must be `noexcept`
+  (enforced at compile time by `bpftime::bpftime_helper_fn`; raw `void *` casts
+  are deleted) and catch any SHM `bad_alloc` / internal exception before
+  returning across uBPF/LLVM JIT frames.
 - Shared-memory objects are allocated via `bpftime::shm_construct` /
   `bpftime::shm_find_or_construct` (`runtime/include/bpftime_shm_safe.hpp`),
   enforcing `shm_safe_type<T>` (no `virtual` functions/`vptr`, raw/member

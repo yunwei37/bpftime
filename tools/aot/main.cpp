@@ -49,9 +49,12 @@ extern "C" int _libbpf_print(libbpf_print_level level, const char *fmt,
 
 bool emit_llvm_ir = false;
 
-int empty_helper()
+int empty_helper() noexcept
 {
-	std::cerr << "Empty helper called" << std::endl;
+	try {
+		std::cerr << "Empty helper called" << std::endl;
+	} catch (...) {
+	}
 	return 0;
 }
 
@@ -64,7 +67,7 @@ bpftime::bpftime_helper_group create_all_helpers()
 		bpftime::bpftime_helper_info info;
 		info.index = i;
 		info.name = "empty_helper";
-		info.fn = (void *)empty_helper;
+		info.fn = empty_helper;
 		helper_group.register_helper(info);
 	}
 	return helper_group;
