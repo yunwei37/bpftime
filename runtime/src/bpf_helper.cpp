@@ -825,10 +825,15 @@ static uint64_t kernel_map_helper_result(long result)
 uint64_t bpftime_map_lookup_elem_helper(uint64_t map, uint64_t key, uint64_t,
 					uint64_t, uint64_t) noexcept
 {
+	const int saved_errno = errno;
 	try {
-		return (uint64_t)bpftime::shm_holder.global_shared_memory
-			.bpf_map_lookup_elem((int)map, (void *)key, false);
+		const void *val = bpftime::shm_holder.global_shared_memory
+					  .bpf_map_lookup_elem(
+						  (int)map, (void *)key, false);
+		errno = saved_errno;
+		return (uint64_t)val;
 	} catch (...) {
+		errno = saved_errno;
 		return 0;
 	}
 }
@@ -837,13 +842,18 @@ uint64_t bpftime_map_update_elem_helper(uint64_t map, uint64_t key,
 					uint64_t value, uint64_t flags,
 					uint64_t) noexcept
 {
+	const int saved_errno = errno;
+	errno = 0;
 	try {
-		return kernel_map_helper_result(
+		const uint64_t res = kernel_map_helper_result(
 			bpftime::shm_holder.global_shared_memory
 				.bpf_map_update_elem((int)map, (void *)key,
 						     (void *)value, flags,
 						     false));
+		errno = saved_errno;
+		return res;
 	} catch (...) {
+		errno = saved_errno;
 		return (uint64_t)-ENOMEM;
 	}
 }
@@ -851,11 +861,16 @@ uint64_t bpftime_map_update_elem_helper(uint64_t map, uint64_t key,
 uint64_t bpftime_map_delete_elem_helper(uint64_t map, uint64_t key, uint64_t,
 					uint64_t, uint64_t) noexcept
 {
+	const int saved_errno = errno;
+	errno = 0;
 	try {
-		return kernel_map_helper_result(
+		const uint64_t res = kernel_map_helper_result(
 			bpftime::shm_holder.global_shared_memory.bpf_delete_elem(
 				(int)map, (void *)key, false));
+		errno = saved_errno;
+		return res;
 	} catch (...) {
+		errno = saved_errno;
 		return (uint64_t)-ENOMEM;
 	}
 }
@@ -864,12 +879,17 @@ uint64_t bpftime_map_push_elem_helper(uint64_t map, uint64_t value,
 				      uint64_t flags, uint64_t,
 				      uint64_t) noexcept
 {
+	const int saved_errno = errno;
+	errno = 0;
 	try {
-		return kernel_map_helper_result(
+		const uint64_t res = kernel_map_helper_result(
 			bpftime::shm_holder.global_shared_memory
 				.bpf_map_push_elem((int)map, (void *)value,
 						   flags, false));
+		errno = saved_errno;
+		return res;
 	} catch (...) {
+		errno = saved_errno;
 		return (uint64_t)-ENOMEM;
 	}
 }
@@ -877,12 +897,17 @@ uint64_t bpftime_map_push_elem_helper(uint64_t map, uint64_t value,
 uint64_t bpftime_map_pop_elem_helper(uint64_t map, uint64_t value, uint64_t,
 				     uint64_t, uint64_t) noexcept
 {
+	const int saved_errno = errno;
+	errno = 0;
 	try {
-		return kernel_map_helper_result(
+		const uint64_t res = kernel_map_helper_result(
 			bpftime::shm_holder.global_shared_memory
 				.bpf_map_pop_elem((int)map, (void *)value,
 						  false));
+		errno = saved_errno;
+		return res;
 	} catch (...) {
+		errno = saved_errno;
 		return (uint64_t)-ENOMEM;
 	}
 }
@@ -890,12 +915,17 @@ uint64_t bpftime_map_pop_elem_helper(uint64_t map, uint64_t value, uint64_t,
 uint64_t bpftime_map_peek_elem_helper(uint64_t map, uint64_t value, uint64_t,
 				      uint64_t, uint64_t) noexcept
 {
+	const int saved_errno = errno;
+	errno = 0;
 	try {
-		return kernel_map_helper_result(
+		const uint64_t res = kernel_map_helper_result(
 			bpftime::shm_holder.global_shared_memory
 				.bpf_map_peek_elem((int)map, (void *)value,
 						   false));
+		errno = saved_errno;
+		return res;
 	} catch (...) {
+		errno = saved_errno;
 		return (uint64_t)-ENOMEM;
 	}
 }
@@ -1056,6 +1086,7 @@ uint64_t bpf_perf_event_output(uint64_t ctx, uint64_t map, uint64_t flags,
 {
 	(void)ctx;
 	(void)flags;
+	const int saved_errno = errno;
 	try {
 		int32_t current_cpu = my_sched_getcpu();
 		if (unlikely(current_cpu == -1)) {
@@ -1105,12 +1136,9 @@ uint64_t bpf_perf_event_output(uint64_t ctx, uint64_t map, uint64_t flags,
 				"Attempting to run perf_output on a non-perf array map");
 			return (uint64_t)-1;
 		}
-	} catch (const std::bad_alloc &) {
-		errno = ENOMEM;
-		return (uint64_t)-1;
 	} catch (...) {
-		errno = ENOMEM;
-		return (uint64_t)-1;
+		errno = saved_errno;
+		return (uint64_t)-ENOMEM;
 	}
 }
 

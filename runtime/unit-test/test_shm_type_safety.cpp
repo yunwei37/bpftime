@@ -101,7 +101,14 @@ static_assert(!std::is_constructible_v<bpftime_helper_fn,
 static_assert(
 	!std::is_constructible_v<bpftime_helper_fn,
 				 decltype(&sample_variadic_throwing_helper)>);
+template <typename T = bpftime_helper_fn>
+constexpr bool helper_fn_has_public_raw_v = requires(T f) { f.raw; };
 static_assert(!std::is_constructible_v<bpftime_helper_fn, void *>);
+static_assert(!std::is_aggregate_v<bpftime_helper_fn>);
+static_assert(!helper_fn_has_public_raw_v<>);
+static_assert(std::is_nothrow_invocable_v<
+	      decltype(attach::signal_callback_context::override_return),
+	      uint64_t, uint64_t>);
 
 struct shm_segment_cleaner {
 	std::string name;

@@ -200,7 +200,7 @@ void release_idle_slot()
 	}
 }
 
-void set_override(uint64_t ctx, uint64_t value)
+void set_override(uint64_t ctx, uint64_t value) noexcept
 {
 	if (tl_slot) {
 		tl_slot->override.is_overrided = true;

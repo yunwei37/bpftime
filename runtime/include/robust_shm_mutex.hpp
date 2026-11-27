@@ -190,7 +190,8 @@ with_robust_shm_lock(bool should_lock, bool blocking, robust_shm_mutex &lock,
 			errno = blocking ? ENOMEM : saved_errno;
 			if constexpr (std::is_pointer_v<Ret>)
 				return Ret(nullptr);
-			return Ret(blocking ? -1 : -ENOMEM);
+			else
+				return Ret(blocking ? -1 : -ENOMEM);
 		}
 	};
 	if (!should_lock)

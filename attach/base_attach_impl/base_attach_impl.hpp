@@ -15,9 +15,10 @@ namespace bpftime
 // Compile-time noexcept gate for BPF helpers invoked across uBPF/LLVM JIT
 // frames (which lack DWARF .eh_frame unwind info, so uncaught C++ exceptions
 // call std::terminate()). Rejects non-noexcept functions and raw void* casts.
-struct bpftime_helper_fn {
+class bpftime_helper_fn {
 	void *raw = nullptr;
 
+    public:
 	constexpr bpftime_helper_fn() noexcept = default;
 
 	template <typename R, typename... Args>
@@ -98,7 +99,7 @@ class attach_callback_scope {
 struct signal_callback_context {
 	uintptr_t function_ip = 0;
 	std::optional<uint64_t> cookie;
-	void (*override_return)(uint64_t, uint64_t) = nullptr;
+	void (*override_return)(uint64_t, uint64_t) noexcept = nullptr;
 };
 #if defined(__linux__)
 __attribute__((tls_model("initial-exec")))
