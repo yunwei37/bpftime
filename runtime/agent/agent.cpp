@@ -246,6 +246,9 @@ static void start_agent_ipc_server_once()
 		agent_ipc_stop.store(false, std::memory_order_release);
 		try {
 			agent_ipc_thread = std::thread([]() {
+			// The IPC worker lives for the agent's lifetime; its own
+			// socket/IPC activity must never trigger the probes it serves.
+			attach_callback_suppression_scope suppress_ipc_callbacks;
 			for (;;) {
 				if (agent_ipc_stop.load(std::memory_order_acquire))
 					return;
@@ -851,6 +854,12 @@ static void bpftime_agent_main_impl(const gchar *data,
 				init_fail();
 				return;
 			}
+			// Probes are armed after init_attach_ctx_from_handlers; keep the
+			// remaining bring-up (dispatch, SHM registration, IPC server,
+			// setenv and logging) suppressed so the agent never samples its
+			// own callbacks. The scope ends with this init block, before the
+			// host thread resumes running user code.
+			attach_callback_suppression_scope suppress_ready_tail;
 #if __linux__ && BPFTIME_BUILD_WITH_LIBBPF
 			syscall_trace_impl_ptr->dispatch_process_exec();
 #endif
