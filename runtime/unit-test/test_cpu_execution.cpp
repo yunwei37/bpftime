@@ -24,7 +24,8 @@ namespace
 std::atomic<int> active_helpers;
 std::atomic<int> maximum_active_helpers;
 
-uint64_t overlap_helper(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t)
+uint64_t overlap_helper(uint64_t, uint64_t, uint64_t, uint64_t,
+			uint64_t) noexcept
 {
 	int active = active_helpers.fetch_add(1, std::memory_order_acq_rel) + 1;
 	int maximum = maximum_active_helpers.load(std::memory_order_relaxed);
@@ -61,8 +62,7 @@ TEST_CASE("BPF executions on one CPU are serialized", "[percpu][execution]")
 	};
 	bpftime_prog prog(reinterpret_cast<const ebpf_inst *>(insns),
 			  std::size(insns), "per_cpu_serialization");
-	bpftime_helper_info helper{ 500, "overlap_helper",
-				    reinterpret_cast<void *>(overlap_helper) };
+	bpftime_helper_info helper{ 500, "overlap_helper", overlap_helper };
 	REQUIRE(prog.bpftime_prog_register_raw_helper(std::move(helper)) == 0);
 	REQUIRE(prog.bpftime_prog_load(true) == 0);
 

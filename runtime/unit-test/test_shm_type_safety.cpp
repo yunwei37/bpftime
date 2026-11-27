@@ -5,10 +5,16 @@
  */
 #include "bpf_attach_ctx.hpp"
 #include "bpf_map/userspace/lpm_trie_map.hpp"
+#include "bpftime_helper_group.hpp"
+#include "bpftime_prog.hpp"
+#include "bpftime_shm.hpp"
 #include "bpftime_shm_safe.hpp"
 #include "handler/handler_manager.hpp"
 #include <catch2/catch_test_macros.hpp>
+#include <cerrno>
 #include <cstring>
+#include <linux/bpf.h>
+#include <linux/filter.h>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -80,6 +86,23 @@ static_assert(!shm_safe_type<std::unordered_map<int, int>>);
 static_assert(!shm_safe_type<std::mutex>);
 static_assert(!shm_safe_type<std::variant<int, void *>>);
 
+uint64_t sample_noexcept_helper(uint64_t) noexcept { return 0; }
+uint64_t sample_variadic_noexcept_helper(uint64_t, ...) noexcept { return 0; }
+uint64_t sample_throwing_helper(uint64_t) { return 0; }
+uint64_t sample_variadic_throwing_helper(uint64_t, ...) { return 0; }
+
+static_assert(std::is_constructible_v<bpftime_helper_fn,
+				      decltype(&sample_noexcept_helper)>);
+static_assert(
+	std::is_constructible_v<bpftime_helper_fn,
+				decltype(&sample_variadic_noexcept_helper)>);
+static_assert(!std::is_constructible_v<bpftime_helper_fn,
+				       decltype(&sample_throwing_helper)>);
+static_assert(
+	!std::is_constructible_v<bpftime_helper_fn,
+				 decltype(&sample_variadic_throwing_helper)>);
+static_assert(!std::is_constructible_v<bpftime_helper_fn, void *>);
+
 struct shm_segment_cleaner {
 	std::string name;
 	~shm_segment_cleaner()
@@ -138,4 +161,101 @@ TEST_CASE("shm_construct and shm_init_ctx survive creator unmap on LPM trie",
 	REQUIRE(*fallback == 0xfeedfacecafebeefULL);
 
 	peer.destroy_ptr(found.first);
+}
+
+TEST_CASE("Map helper catches SHM bad_alloc across JIT frame as -ENOMEM",
+	  "[shm_safe][helper][noexcept]")
+{
+	const std::string shm_name =
+		"bpftime_jit_noexcept_" + std::to_string(getpid());
+	shared_memory_object::remove(shm_name.c_str());
+	const char *prev_name = getenv("BPFTIME_GLOBAL_SHM_NAME");
+	const char *prev_mb = getenv("BPFTIME_SHM_MEMORY_MB");
+	struct env_restore {
+		std::string shm_name;
+		bool had_name;
+		std::string old_name;
+		bool had_mb;
+		std::string old_mb;
+		~env_restore()
+		{
+			bpftime_destroy_global_shm();
+			shared_memory_object::remove(shm_name.c_str());
+			if (had_name)
+				setenv("BPFTIME_GLOBAL_SHM_NAME",
+				       old_name.c_str(), 1);
+			else
+				unsetenv("BPFTIME_GLOBAL_SHM_NAME");
+			if (had_mb)
+				setenv("BPFTIME_SHM_MEMORY_MB",
+				       old_mb.c_str(), 1);
+			else
+				unsetenv("BPFTIME_SHM_MEMORY_MB");
+		}
+	} guard{ shm_name, prev_name != nullptr, prev_name ? prev_name : "",
+		 prev_mb != nullptr, prev_mb ? prev_mb : "" };
+
+	REQUIRE(setenv("BPFTIME_GLOBAL_SHM_NAME", shm_name.c_str(), 1) == 0);
+	REQUIRE(setenv("BPFTIME_SHM_MEMORY_MB", "4", 1) == 0);
+	bpftime_destroy_global_shm();
+	bpftime_initialize_global_shm(shm_open_type::SHM_REMOVE_AND_CREATE);
+
+	struct lpm_key4 {
+		uint32_t prefixlen;
+		uint32_t data;
+	};
+	const int map_fd = bpftime_maps_create(
+		-1, "oom_lpm",
+		{ .type = static_cast<uint32_t>(BPF_MAP_TYPE_LPM_TRIE),
+		  .key_size = sizeof(lpm_key4),
+		  .value_size = 1024 * 1024,
+		  .max_ents = 16,
+		  .flags = BPF_F_NO_PREALLOC });
+	REQUIRE(map_fd >= 0);
+
+	// BPF program compiled through JIT:
+	//   r2 = *(u64 *)(r1 + 0)   (key ptr)
+	//   r3 = *(u64 *)(r1 + 8)   (value ptr)
+	//   r1 = map_fd
+	//   r4 = 0
+	//   call BPF_FUNC_map_update_elem (2)
+	//   exit
+	struct ebpf_inst insns[] = {
+		{ .code = 0x79, .dst_reg = 2, .src_reg = 1, .off = 0, .imm = 0 },
+		{ .code = 0x79, .dst_reg = 3, .src_reg = 1, .off = 8, .imm = 0 },
+		{ .code = 0xb7, .dst_reg = 1, .src_reg = 0, .off = 0, .imm = map_fd },
+		{ .code = 0xb7, .dst_reg = 4, .src_reg = 0, .off = 0, .imm = 0 },
+		{ .code = 0x85, .dst_reg = 0, .src_reg = 0, .off = 0, .imm = 2 },
+		{ .code = 0x95, .dst_reg = 0, .src_reg = 0, .off = 0, .imm = 0 },
+	};
+	runtime_config cfg;
+	cfg.set_vm_name("ubpf");
+	bpftime_prog prog(insns, std::size(insns), "jit_oom_test",
+			  std::move(cfg));
+	REQUIRE(bpftime_helper_group::get_shm_maps_helper_group()
+			.add_helper_group_to_prog(&prog) == 0);
+	REQUIRE(prog.bpftime_prog_load(true) == 0);
+
+	std::vector<uint8_t> big_val(1024 * 1024, 0x5a);
+	struct ctx_args {
+		uint64_t key_ptr;
+		uint64_t val_ptr;
+	};
+	uint64_t retval = 0;
+	bool saw_enomem = false;
+	for (uint32_t i = 0; i < 8; ++i) {
+		lpm_key4 k{ 32, i + 1 };
+		ctx_args args{ reinterpret_cast<uint64_t>(&k),
+			       reinterpret_cast<uint64_t>(big_val.data()) };
+		errno = EAGAIN;
+		REQUIRE(prog.bpftime_prog_exec(&args, sizeof(args), &retval) ==
+			0);
+		REQUIRE(errno == EAGAIN);
+		if (retval == static_cast<uint64_t>(-ENOMEM)) {
+			saw_enomem = true;
+			break;
+		}
+		REQUIRE(retval == 0);
+	}
+	REQUIRE(saw_enomem);
 }
