@@ -108,9 +108,14 @@ TEST_CASE("Software perf shard cache stays independent across threads",
 		for (size_t round = 0; round < 2; ++round) {
 			for (size_t i = 0; i < cache_fixture::event_count;
 			     ++i) {
-				if (fixture.output(fixture.events[i], worker_id,
-						   static_cast<int>(round)) !=
-				    0) {
+				int rc = 0;
+				do {
+					rc = fixture.output(
+						fixture.events[i], worker_id,
+						static_cast<int>(round));
+				} while (round == 0 && rc == -1 &&
+					 errno == EBUSY);
+				if (rc != 0) {
 					failed.store(true,
 						     std::memory_order_release);
 				}
@@ -201,6 +206,66 @@ TEST_CASE("Software perf shard resolves the child's tid after fork",
 	REQUIRE(WIFEXITED(status));
 	// 3 = output failed in the child; 4 = the child kept the parent's tid.
 	REQUIRE(WEXITSTATUS(status) == 0);
+}
+
+TEST_CASE("Software perf shard cold miss uses trylock and reuses fixed slots",
+	  "[perf_event][software_perf_event][cache]")
+{
+	const std::string shm_name =
+		"SoftwarePerfTrylockReuseShm-" + std::to_string(getpid());
+	shm_remove remover{ std::string(shm_name) };
+	boost::interprocess::managed_shared_memory shm(
+		boost::interprocess::create_only, shm_name.c_str(),
+		16 * 1024 * 1024);
+	auto *event = shm.construct<bpftime::software_perf_event_data>(
+		"trylock_perf")(0, 0, 0, shm);
+	REQUIRE(event != nullptr);
+	REQUIRE(event->ensure_mmap_buffer(getpagesize() + 64 * 1024) !=
+		nullptr);
+	const auto *slot0_addr = &event->producer_shards[0];
+
+	// 1. Contended shard_lock must fail immediately with EBUSY (never block).
+	{
+		bpftime::robust_shm_lock_guard held(event->shard_lock,
+						    "test-hold");
+		REQUIRE(held.owns_lock());
+		const uint64_t skips_before =
+			bpftime::get_shm_trylock_skip_count();
+		int rc = 0;
+		int err = 0;
+		std::thread contender([&] {
+			int payload = 7;
+			errno = 0;
+			rc = event->output_data(&payload, sizeof(payload));
+			err = errno;
+		});
+		contender.join();
+		REQUIRE(rc == -1);
+		REQUIRE(err == EBUSY);
+		REQUIRE(bpftime::get_shm_trylock_skip_count() > skips_before);
+	}
+
+	// 2. Exited threads' slots are reclaimed and reused in place without moving.
+	for (int wave = 0; wave < 3; ++wave) {
+		std::thread worker([&] {
+			int payload = 100 + wave;
+			REQUIRE(event->output_data(&payload,
+						   sizeof(payload)) == 0);
+		});
+		worker.join();
+		bool reclaimed = false;
+		for (int round = 0; round < 32 && !reclaimed; ++round) {
+			for (int i = 0; i < 64; ++i)
+				(void)event->has_data();
+			reclaimed = (event->active_shard_count() == 0);
+			if (!reclaimed)
+				std::this_thread::sleep_for(
+					std::chrono::milliseconds(5));
+		}
+		REQUIRE(reclaimed);
+		REQUIRE(event->shard_high_water == 1);
+		REQUIRE(&event->producer_shards[0] == slot0_addr);
+	}
 }
 
 #endif
