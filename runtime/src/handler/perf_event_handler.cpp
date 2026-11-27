@@ -113,6 +113,16 @@ void clear_software_perf_event_shard_cache() noexcept;
 
 pid_t bpftime_cached_pid = getpid();
 thread_local int64_t bpftime_cached_tid = -1;
+thread_local uint64_t bpftime_cached_nonce = 0;
+std::atomic<uint64_t> bpftime_next_thread_nonce{ 1 };
+
+uint64_t mint_thread_nonce(int pid) noexcept
+{
+	const uint64_t seq =
+		bpftime_next_thread_nonce.fetch_add(1, std::memory_order_relaxed);
+	const uint64_t v = ((uint64_t)(uint32_t)pid << 32) ^ seq;
+	return v != 0 ? v : 1;
+}
 
 void bpftime_refresh_cached_tid_in_child()
 {
@@ -120,6 +130,7 @@ void bpftime_refresh_cached_tid_in_child()
 	// carries the parent's tid and shard pointers; clear both on fork.
 	bpftime_cached_pid = getpid();
 	bpftime_cached_tid = -1;
+	bpftime_cached_nonce = 0;
 	clear_software_perf_event_shard_cache();
 }
 
@@ -136,24 +147,34 @@ int current_process_id() noexcept
 #endif
 }
 
-int64_t current_thread_id() noexcept
+int64_t current_thread_id(int pid, uint64_t &nonce_out) noexcept
 {
 #if __linux__
 	const int saved_errno = errno;
 	if (bpftime_tid_atfork_status != 0) {
 		const int64_t tid = (int64_t)syscall(SYS_gettid);
 		errno = saved_errno;
+		if (bpftime_cached_nonce == 0)
+			bpftime_cached_nonce = mint_thread_nonce(pid);
+		nonce_out = bpftime_cached_nonce;
 		return tid;
 	}
-	if (bpftime_cached_tid == -1)
+	if (bpftime_cached_tid == -1) {
 		bpftime_cached_tid = (int64_t)syscall(SYS_gettid);
+		bpftime_cached_nonce = mint_thread_nonce(pid);
+	}
 	errno = saved_errno;
+	nonce_out = bpftime_cached_nonce;
 	return bpftime_cached_tid;
 #elif __APPLE__
 	uint64_t tid = 0;
 	pthread_threadid_np(nullptr, &tid);
+	const uint64_t v = ((uint64_t)(uint32_t)pid << 32) ^ tid;
+	nonce_out = v != 0 ? v : 1;
 	return (int64_t)tid;
 #else
+	(void)pid;
+	nonce_out = 1;
 	return 0;
 #endif
 }
@@ -587,7 +608,7 @@ bool software_perf_event_buffer::copy_next_record_to(
 
 software_perf_event_shard::software_perf_event_shard(
 	int pagesize, software_perf_event_buffer::segment_manager *manager)
-	: pid(0), tid(0), generation(0), buffer_generation(0),
+	: pid(0), tid(0), owner_nonce(0), generation(0), buffer_generation(0),
 	  buffer(pagesize, manager, false)
 {
 }
@@ -614,7 +635,8 @@ software_perf_event_data::~software_perf_event_data()
 software_perf_event_shard *software_perf_event_data::get_current_thread_shard()
 {
 	const int pid = current_process_id();
-	const int64_t tid = current_thread_id();
+	uint64_t nonce = 0;
+	const int64_t tid = current_thread_id(pid, nonce);
 	uint64_t current_buffer_generation =
 		__atomic_load_n(&producer_buffer_generation, __ATOMIC_ACQUIRE);
 	for (auto &entry : software_perf_event_shard_cache) {
@@ -627,6 +649,8 @@ software_perf_event_shard *software_perf_event_data::get_current_thread_shard()
 					   __ATOMIC_ACQUIRE) == pid &&
 			   __atomic_load_n(&entry.shard->tid,
 					   __ATOMIC_ACQUIRE) == tid &&
+			   __atomic_load_n(&entry.shard->owner_nonce,
+					   __ATOMIC_ACQUIRE) == nonce &&
 			   __atomic_load_n(&entry.shard->generation,
 					   __ATOMIC_ACQUIRE) ==
 				   entry.shard_generation &&
@@ -640,8 +664,9 @@ software_perf_event_shard *software_perf_event_data::get_current_thread_shard()
 		break;
 	}
 
-	// Lock-free scan over fixed-address slots for an already-allocated shard
-	// (covers TLS cache rotation when a thread emits to >6 perf events).
+	// Lock-free scan over fixed-address slots for an already-allocated shard.
+	// Matching owner_nonce proves this exact live thread owns the slot (never
+	// a dead thread whose OS tid wrapped while consumer reclaim was in flight).
 	const uint32_t high =
 		__atomic_load_n(&shard_high_water, __ATOMIC_ACQUIRE);
 	for (uint32_t i = 0; i < high; ++i) {
@@ -650,6 +675,8 @@ software_perf_event_shard *software_perf_event_data::get_current_thread_shard()
 			__atomic_load_n(&shard.generation, __ATOMIC_ACQUIRE);
 		if (__atomic_load_n(&shard.pid, __ATOMIC_ACQUIRE) == pid &&
 		    __atomic_load_n(&shard.tid, __ATOMIC_ACQUIRE) == tid &&
+		    __atomic_load_n(&shard.owner_nonce, __ATOMIC_ACQUIRE) ==
+			    nonce &&
 		    __atomic_load_n(&shard.buffer_generation,
 				    __ATOMIC_ACQUIRE) ==
 			    current_buffer_generation &&
@@ -673,6 +700,7 @@ software_perf_event_shard *software_perf_event_data::get_current_thread_shard()
 	current_buffer_generation =
 		__atomic_load_n(&producer_buffer_generation, __ATOMIC_ACQUIRE);
 	uint32_t slot_idx = UINT32_MAX;
+	uint32_t retired_own_idx = UINT32_MAX;
 	for (uint32_t i = 0; i < shard_high_water; ++i) {
 		auto &shard = producer_shards[i];
 		const int shard_pid =
@@ -684,16 +712,27 @@ software_perf_event_shard *software_perf_event_data::get_current_thread_shard()
 		}
 		if (shard_pid == pid &&
 		    __atomic_load_n(&shard.tid, __ATOMIC_ACQUIRE) == tid &&
-		    __atomic_load_n(&shard.buffer_generation,
-				    __ATOMIC_ACQUIRE) ==
+		    __atomic_load_n(&shard.owner_nonce, __ATOMIC_ACQUIRE) ==
+			    nonce) {
+			if (__atomic_load_n(&shard.buffer_generation,
+					    __ATOMIC_ACQUIRE) ==
 			    current_buffer_generation) {
-			const uint64_t gen = __atomic_load_n(&shard.generation,
-							     __ATOMIC_ACQUIRE);
-			cache_software_perf_event_shard({
-				event_generation, current_buffer_generation,
-				gen, &shard, this
-			});
-			return &shard;
+				const uint64_t gen = __atomic_load_n(
+					&shard.generation, __ATOMIC_ACQUIRE);
+				cache_software_perf_event_shard({
+					event_generation,
+					current_buffer_generation, gen, &shard,
+					this
+				});
+				return &shard;
+			}
+			// Superseded buffer_generation owned by this thread:
+			// upgrade in place if empty, otherwise mark retired once
+			// a replacement slot succeeds so consumer reclaim frees it.
+			if (!shard.buffer.has_data())
+				slot_idx = i;
+			else
+				retired_own_idx = i;
 		}
 	}
 	if (slot_idx == UINT32_MAX) {
@@ -714,10 +753,14 @@ software_perf_event_shard *software_perf_event_data::get_current_thread_shard()
 		smp_store_release_u64(&hdr.data_tail, 0);
 		smp_store_release_u64(&hdr.data_head, 0);
 	}
+	if (retired_own_idx != UINT32_MAX && retired_own_idx != slot_idx)
+		__atomic_store_n(&producer_shards[retired_own_idx].owner_nonce,
+				 0, __ATOMIC_RELEASE);
 	const uint64_t gen = next_shard_generation++;
 	__atomic_store_n(&slot.buffer_generation, current_buffer_generation,
 			 __ATOMIC_RELEASE);
 	__atomic_store_n(&slot.tid, tid, __ATOMIC_RELEASE);
+	__atomic_store_n(&slot.owner_nonce, nonce, __ATOMIC_RELEASE);
 	__atomic_store_n(&slot.generation, gen, __ATOMIC_RELEASE);
 	__atomic_store_n(&slot.pid, pid, __ATOMIC_RELEASE);
 	if (slot_idx >= shard_high_water)
@@ -786,10 +829,15 @@ void software_perf_event_data::reclaim_inactive_producer_shards_locked()
 			continue;
 		const int64_t shard_tid =
 			__atomic_load_n(&shard.tid, __ATOMIC_ACQUIRE);
+		const uint64_t shard_nonce =
+			__atomic_load_n(&shard.owner_nonce, __ATOMIC_ACQUIRE);
 		if (!shard.buffer.has_data() &&
-		    !is_thread_alive(shard_pid, shard_tid)) {
+		    (shard_nonce == 0 ||
+		     !is_thread_alive(shard_pid, shard_tid))) {
 			__atomic_store_n(&shard.pid, 0, __ATOMIC_RELEASE);
 			__atomic_store_n(&shard.tid, 0, __ATOMIC_RELEASE);
+			__atomic_store_n(&shard.owner_nonce, 0,
+					 __ATOMIC_RELEASE);
 			__atomic_store_n(&shard.generation,
 					 next_shard_generation++,
 					 __ATOMIC_RELEASE);

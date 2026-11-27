@@ -101,6 +101,7 @@ struct software_perf_event_buffer {
 struct software_perf_event_shard {
 	int pid;
 	int64_t tid;
+	uint64_t owner_nonce;
 	uint64_t generation;
 	uint64_t buffer_generation;
 	software_perf_event_buffer buffer;
